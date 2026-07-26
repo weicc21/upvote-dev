@@ -1,0 +1,19 @@
+# Module: telemetry
+Compile unit for the Orchestration Service.
+Generates: `orchestrator/telemetry.py`
+
+## Role
+The write-only `decision_log` gateway. Every governance decision flows through here at the moment it is made — a decision that isn't logged is a label lost forever.
+
+## Interface
+- `async log_decision(feature_id, batch_id, phase, agent, decision: dict, model_version)`
+- Phases: `screening | dedup | friction | compile | deploy | lifecycle`.
+
+## Behavior
+- Insert-only against `decision_log`; never UPDATE or DELETE (the table is the permanent evaluator-training dataset).
+- **Content-free rule for dropped features**: screening entries for MALICIOUS/OFF_TOPIC drops carry `feature_id`, classification, reason category, and model version — never the dropped title or description text. Survivors may be referenced by `feature_id` (their content is persisted normally in Phase 2).
+- Telemetry failures never block the pipeline: log a warning and continue, but count failures for ops visibility.
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>orchestrator/contracts.py</include>

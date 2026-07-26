@@ -1,0 +1,46 @@
+# Module: deps (dependency-injection seam)
+Compile unit for the Forum Backend API.
+Generates: `backend/deps.py`
+
+## Role
+The single injection seam shared by every route module and the event relay. Declares
+FastAPI dependency providers and the shared error envelope — **no endpoints, no business
+logic, no queries**. Every route module imports its clients and its caller identity from
+here, so there is exactly one place tests override.
+
+## Providers
+- `get_supabase()` and `get_redis()` are declared here and **never construct a client**.
+  `main.py` creates the real Supabase and Redis clients once at startup and overrides
+  these via `app.dependency_overrides`; unit tests override them with a stubbed Supabase
+  client and `fakeredis`. A provider that has not been overridden **raises
+  `RuntimeError`** — no module may fall back to building its own client, and no
+  module-level client global exists anywhere in the backend.
+- `get_optional_user_id()` → `str | None` (public reads; `None` when anonymous) and
+  `get_current_user_id()` → the caller id, raising `401` with the standard error envelope
+  when absent. Both read only the id that the `main.py` auth middleware already resolved
+  and stamped on `request.state.user_id` — neither verifies a JWT, and neither reads
+  `DEV_MODE`. That decision belongs to the middleware in `main.py` and is made once.
+- `ErrorResponse` — the shared error envelope model (`error.code` / `error.message`)
+  exactly as `prompts/shared/openapi.yaml` defines it, plus a helper that raises it as an
+  `HTTPException` so every route returns byte-identical error bodies. The `429` variant
+  carries `resets_at`.
+
+## Settings
+Env-backed settings are read from `os.environ` **at request time**, using the `*_ENV`
+name constants from `backend/contracts.py` — never a literal env-var string, never cached
+at import. `SANDBOX_ALLOWED_HOSTS` is parsed here once per read into a host-glob matcher
+(`fnmatch`-style, case-insensitive, matched against the parsed hostname) and exposed as
+`sandbox_host_allowed(url) -> bool`, since both `routes/reads.py` and `routes/webhook.py`
+enforce the same allowlist and must not drift.
+
+## Modules that do not exist
+This is the whole seam. There is **no** `backend.auth`, `backend.config`,
+`backend.database`, `backend.db`, `backend.models`, `backend.redis_client`, or
+`backend.session` module — do not import from any of them, and do not create one.
+There is no ORM: SQLAlchemy is not a project dependency, and Postgres is reached only
+through the `supabase` Python client obtained from `get_supabase()`.
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>backend/contracts.py</include>
+<include>prompts/shared/openapi.yaml</include>

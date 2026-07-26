@@ -1,0 +1,9 @@
+# Module: contracts (Forum Frontend — TypeScript)
+Generates: `frontend/src/contracts.ts`
+
+Emit the shared binding contract below as an importable TypeScript constants module for the Forum Frontend. Expose the canonical status enum as a `const` union / `as const` object (case-sensitive string literals) plus a derived `Status` type, and export the wire field names the frontend depends on. The frontend only reads/writes over the HTTP API + Supabase Realtime, so include the **status enum, error/`429` envelope keys, and wire naming** it needs — not the Redis keys or Postgres DDL (those are service-internal). Values are **verbatim and case-sensitive** — never rename or re-case them. Generated from the shared spec; the snake_case wire names here must match the backend contract exactly.
+
+<include>prompts/shared/contracts.prompt</include>
+
+## Dependencies
+- `prompts/shared/contracts.prompt` (canonical spec, inlined above via `<include>`).

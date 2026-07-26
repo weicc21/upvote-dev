@@ -1,0 +1,19 @@
+# Module: sandbox
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/components/sandbox.tsx` (current hand-authored code is the reference output)
+
+## Behavior
+- Sticky side panel housing the `<iframe>` of the live demo app.
+- **Preview source chain**: `GET /api/sandbox` (`preview_url` + `version`, allowlist-validated by the backend) → `VITE_SANDBOX_URL` env (local dev) → self-contained mocked `srcdoc` (standalone fallback).
+- **Refresh semantics**: "Refresh Preview" remounts the iframe (React `key`) and appends `?v={version}` so a stale cached build is never shown.
+- **Deploy-aware glow**: pulse the button only on a Supabase Realtime INSERT on `deployments` — never on ticker copy or build-started events; stop pulsing after refresh.
+- **Cold start**: show "🔥 Warming up the sandbox..." skeleton until iframe `onLoad`; degrade gracefully on timeout.
+- **Escape hatch**: always render "Open sandbox in new tab ↗" beneath the frame.
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>

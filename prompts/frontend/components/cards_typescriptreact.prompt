@@ -1,0 +1,21 @@
+# Module: cards
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/components/cards.tsx` (current hand-authored code is the reference output)
+
+Imports the shared upvote control from the sibling `upvote_button` module (`prompts/frontend/components/upvote_button_typescriptreact.prompt` → `frontend/src/components/upvote_button.tsx`); never re-implement that interaction here.
+
+## Components
+- **FeatureCard** — status pill per stage: `CONSOLIDATING` "🪄 AI Merging Duplicates" (animated wand), `IN_SPRINT` "🛠️ AI Building" (loading ring), `COMPILED` "🎉 Live in Sandbox" (green flash), `SPLIT` "🚀 AI Evolving" (expandable). `VOTING` cards render the `UpvoteButton` (default size); other stages show a frozen vote count. Cards with `extends_id` show a subtle "🧬 Builds on {base title}" reference.
+- **UnlockTree** (inside SPLIT expansion) — parent title + child rows: lock/unlock icon, progress bar toward `unlock_threshold`, per-child `UpvoteButton` (small size), unlocked celebration state.
+- **HoldingCard** — "Structural Paradox Detected" header, holding cycle x of 2, `ai_explanation` in an empathetic callout.
+- **VaultCard** — archive copy ("Archived due to low community velocity...") + "⚡ Reboot request" action.
+- **ShippedCard** — "🏆 Shipped in {version}" pill, author credit, final vote count, shipped date.
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/components/upvote_button.tsx</include>
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>

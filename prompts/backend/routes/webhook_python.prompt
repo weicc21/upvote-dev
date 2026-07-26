@@ -1,0 +1,29 @@
+# Module: webhook (Render deploy webhook)
+Compile unit for the Forum Backend API.
+Generates: `backend/routes/webhook.py`
+
+## Framework + data access
+- **FastAPI.** Exports a module-level `router = APIRouter()` — `main.py` imports it as
+  `from backend.routes.webhook import router`.
+- Postgres is reached only through the `supabase` client returned by `get_supabase()`,
+  imported from `backend/deps.py` along with `ErrorResponse` and `sandbox_host_allowed`.
+  **There is no `backend.db` module and no `get_db()` helper — do not import or create
+  one.** No ORM, no psycopg2, no raw SQL, no module-level client.
+- This endpoint authenticates by shared secret, not by JWT: it takes **no** caller
+  identity dependency (`get_current_user_id` is not used here).
+- Table and column names come from `backend/contracts.py` (`DEPLOYMENTS_TABLE`,
+  `FEATURE_REQUESTS_TABLE`, `BROADCAST_EVENTS_TABLE`, `DECISION_LOG_TABLE` and the `*Cols`
+  enums); statuses come from the `Status` StrEnum; the broadcast phase from `AgentPhase`.
+
+## Endpoint: POST /webhooks/render
+1. Verify the shared webhook secret, read at request time via the `RENDER_WEBHOOK_SECRET_ENV` name constant from `backend/contracts.py` and compared with `secrets.compare_digest`; reject unsigned or mismatched calls with `401`. Route excluded from CORS.
+2. Validate the deploy's `preview_url` with `sandbox_host_allowed()` from `backend/deps.py` at write time — never store a URL outside the allowlist, and do not re-implement the glob match here (`routes/reads.py` enforces the identical rule at read time).
+3. **Deploy live**: insert a `deployments` row (this INSERT is the frontend's Realtime signal to pulse "Refresh Preview"); transition the batch's `IN_SPRINT` features to `COMPILED` (the only place this transition happens); emit a `deployed`-phase `broadcast_events` row ("🚀 Success! ... Click 'Refresh Preview' to try it out!"); record a `deploy`-phase `decision_log` entry per shipped feature.
+4. **Deploy failed**: touch no statuses (orchestrator lifecycle rolls the batch back to `VOTING`); emit a friendly broadcast event — never raw build errors; record failure entries in `decision_log`.
+5. Request/response shapes conform to `prompts/shared/openapi.yaml` (`/webhooks/render`). All `decision_log` entries from this module use `model_version='programmatic'` and `agent='render_webhook'`. Note the orchestrator learns deploy outcomes by polling `deployments` — this module never publishes to Redis.
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>backend/contracts.py</include>
+<include>backend/deps.py</include>
+<include>prompts/shared/openapi.yaml</include>

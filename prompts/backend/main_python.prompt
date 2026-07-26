@@ -1,0 +1,24 @@
+# Module: main (FastAPI app wiring)
+Compile unit for the Forum Backend API.
+Generates: `backend/main.py`
+
+## Role
+FastAPI application assembly. No business logic lives here.
+
+## Behavior
+- Settings from env, read through the `*_ENV` **name constants** in `backend/contracts.py` (never a literal env string): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `REDIS_URL`, `RENDER_WEBHOOK_SECRET`, `SANDBOX_ALLOWED_HOSTS`, `SANDBOX_URL` (optional bootstrap), `FORUM_ORIGIN`, `DEV_MODE` (boolean, default `false`).
+- CORS: allow `FORUM_ORIGIN` only; the `/webhooks/render` route is excluded from CORS (protected by its shared secret instead).
+- Registers the routers from `routes/reads.py`, `routes/writes.py`, `routes/webhook.py`.
+- **Client injection seam (testability):** the providers themselves live in `backend/deps.py` (`get_supabase`, `get_redis`), which is the single seam every route module imports from. `main.py` creates the Redis and Supabase clients **once at startup** (lifespan) and binds them by installing overrides for those two providers in `app.dependency_overrides` — no module-level client globals, and `main.py` declares no providers of its own. Unit tests override the same two `deps` providers to inject `fakeredis` / a stubbed Supabase client. No route constructs its own client.
+- On startup, launches the `event_relay` background task; on shutdown, cancels it cleanly.
+- Auth middleware: resolves the caller's id for writes (reads are anonymous) and stamps it on `request.state.user_id` — the `get_current_user_id` / `get_optional_user_id` helpers in `backend/deps.py` only read that value, so JWT verification and the `DEV_MODE` decision happen here and nowhere else. When `DEV_MODE=false` (default), verify the Supabase Auth JWT. When `DEV_MODE=true`, **skip signature verification** and take the id from the `X-Dev-User` header (a UUID), falling back to a fixed anonymous-session UUID when the header is absent — so `curl` can simulate distinct users/voters without account management. The resolved id is used as `author_id` on pitches and `user_id` on votes. `DEV_MODE=true` is spoofable by design; never enable it in production.
+- **This service never calls an LLM and never touches the target prompt file.**
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>backend/contracts.py</include>
+<include>backend/deps.py</include>
+<include>backend/routes/reads.py</include>
+<include>backend/routes/writes.py</include>
+<include>backend/routes/webhook.py</include>
+<include>backend/event_relay.py</include>

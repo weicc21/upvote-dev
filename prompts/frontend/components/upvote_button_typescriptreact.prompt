@@ -1,0 +1,26 @@
+# Module: upvote_button
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/components/upvote_button.tsx` (current hand-authored code is the reference output)
+
+## Role
+The signature interaction of the forum and the primary user action of the whole product: casting the single upvote that the backend's AI governance uses to screen, prioritize, and compile feature ideas. One reusable control, rendered wherever a feature — or a SPLIT child — can be hyped: on `VOTING` FeatureCards (default size) and on each child row inside `UnlockTree` (small size). `cards` imports this module rather than re-implementing the interaction.
+
+## Behavior
+- Squishy arcade press + particle burst on click; after one vote it locks to "Hyped!" and stays disabled.
+- One-vote-per-user is **server-enforced**; the UI mirrors it optimistically: increment the count and lock immediately on click via `api_client.upvote(id)`, then reconcile against the response. A `409` (already hyped) settles into the locked "Hyped!" state — treated as success, never surfaced as an error.
+- Initial locked state seeds from `viewer_has_voted` / `votedIds` so a returning viewer sees their prior vote already cast.
+- Size variants: `default` (card CTA) and `small` (UnlockTree child rows) — same behavior, tokenized sizing only.
+
+## Accessibility (component-specific — beyond the shared design guide)
+Real `<button>` semantics with `aria-pressed` reflecting the hyped state.
+
+## Testing convention
+Vitest + React Testing Library + jsdom against a stubbed `api_client` (mock `upvote`) — never a live backend. Cover: first click locks + optimistic increment; `409` also locks with no error surfaced; `viewer_has_voted` pre-seeded lock; `default` vs `small` variant; `prefers-reduced-motion` path.
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>

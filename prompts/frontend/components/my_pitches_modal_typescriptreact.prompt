@@ -1,0 +1,18 @@
+# Module: my_pitches_modal
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/components/my_pitches_modal.tsx` (current hand-authored code is the reference output)
+
+## Behavior
+- Author-only dialog opened from the masthead "🔒 My pitches" control; labeled "Only you can see these."
+- Lists the caller's pending pitches from `api_client.getMyFeatures` (`GET /api/features/mine`): `screening` state shows the pulsing "🛡️ Guardagent is screening your pitch..." row; `rejected` shows reason-mapped copy — `security` → "Your pitch didn't clear screening — rephrase and try again."; `off_topic` → "Great idea, but it's outside what this app is about — check the Sandbox to see what we're building." — each with a Dismiss action.
+- Rejected entries also vanish automatically when their 72h TTL lapses server-side — treat a disappeared entry as dismissed, not an error.
+- Promotion: when a pending pitch's `feature_requests` INSERT arrives via Realtime (matched by `feature_id`), remove it here and celebrate as it enters the public feed.
+- Friendly empty state inviting a first pitch. **Never render any of this inline with the public feed.**
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>

@@ -1,0 +1,95 @@
+version: "1.0"
+
+contexts:
+  # Shared fallback — applied to any prompt not matched by a context below,
+  # and as the base for the per-area defaults.
+  default:
+    defaults:
+      generate_output_path: "pdd/"
+      test_output_path: "tests/"
+      example_output_path: "context/"
+      default_language: "python"
+      strength: 0.818
+      temperature: 0.0
+      target_coverage: 80.0
+      budget: 10.0
+      max_attempts: 3
+
+  # Shared contracts — the single canonical binding contract every module
+  # depends on (prompts/shared/contracts.prompt). It is the source of truth,
+  # not compiled directly; each service has a thin wrapper prompt that
+  # <include>s it and emits a per-service constants module in that service's
+  # own output dir:
+  #   prompts/backend/contracts_python.prompt        -> backend/contracts.py
+  #   prompts/orchestration/contracts_python.prompt  -> orchestrator/contracts.py
+  #   prompts/frontend/contracts_typescript.prompt   -> frontend/src/contracts.ts
+  # openapi.yaml is a frozen asset (reference/context only — never generated).
+  # generate_output_path here is a fallback only (the canonical prompt is not
+  # generated on its own); it lands any direct build under shared/.
+  shared:
+    paths:
+      - "prompts/shared/**"
+    defaults:
+      generate_output_path: "shared/"
+      test_output_path: "shared/tests/"
+      example_output_path: "prompts/shared/"
+      default_language: "python"
+      strength: 0.818
+      temperature: 0.0
+      target_coverage: 80.0
+      budget: 10.0
+      max_attempts: 3
+
+  # Forum Frontend — TypeScript React prompts (prompts/frontend/**).
+  # Output mirrors the prompt tree relative to prompts/frontend/ under
+  # generate_output_path (PDD subpath mirroring):
+  #   prompts/frontend/app_shell_typescriptreact.prompt        -> frontend/src/App.tsx
+  #   prompts/frontend/api_client_typescript.prompt            -> frontend/src/api.ts
+  #   prompts/frontend/contracts_typescript.prompt             -> frontend/src/contracts.ts
+  #   prompts/frontend/components/*_typescriptreact.prompt     -> frontend/src/components/*.tsx
+  frontend:
+    paths:
+      - "prompts/frontend/**"
+    defaults:
+      generate_output_path: "frontend/src/"
+      test_output_path: "frontend/src/__tests__/"
+      example_output_path: "frontend/src/examples/"
+      default_language: "typescriptreact"
+      strength: 0.818
+      temperature: 0.0
+      target_coverage: 80.0
+      budget: 10.0
+      max_attempts: 3
+
+  # Forum Backend API — Python prompts (prompts/backend/*_python.prompt)
+  # → backend/ (main.py, event_relay.py) and backend/routes/
+  backend:
+    paths:
+      - "prompts/backend/**"
+    defaults:
+      generate_output_path: "backend/"
+      test_output_path: "backend/tests/"
+      example_output_path: "backend/context/"
+      default_language: "python"
+      strength: 0.818
+      temperature: 0.0
+      target_coverage: 80.0
+      budget: 10.0
+      max_attempts: 3
+
+  # Orchestration — Python agent/service prompts
+  # (prompts/orchestration/*_python.prompt, with templates/ system prompts)
+  # → orchestrator/
+  orchestration:
+    paths:
+      - "prompts/orchestration/**"
+    defaults:
+      generate_output_path: "orchestrator/"
+      test_output_path: "orchestrator/tests/"
+      example_output_path: "orchestrator/context/"
+      default_language: "python"
+      strength: 0.818
+      temperature: 0.0
+      target_coverage: 80.0
+      budget: 10.0
+      max_attempts: 3

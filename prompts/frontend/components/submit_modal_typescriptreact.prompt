@@ -1,0 +1,19 @@
+# Module: submit_modal
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/components/submit_modal.tsx` (current hand-authored code is the reference output)
+
+## Behavior
+- Field A: Feature Title — max 60 chars, single line, live character countdown (warns when low).
+- Field B: Functional Scope — max 300 chars, multi-line, live countdown; reject under 30 chars with copy nudging precise, implementation-first behaviors over sweeping epics.
+- Shows the coin cost: "Costs 1 🪙 · N left today"; submit button "🔥 Pitch it (1 🪙)".
+- On submit: call `api_client.createFeature`; on `202`, close and let the shell show the screening toast + pending entry (author-only). On `429`: "You've hit 5 pitches this hour — take a breather" style copy and disabled submit.
+- Validation errors render inline, friendly, verbatim-displayable; never raw error detail.
+- Dialog a11y: `role="dialog"`, `aria-modal`, labelled title, backdrop click + ✕ to close, autofocus on Field A.
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>

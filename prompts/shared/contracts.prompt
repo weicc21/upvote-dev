@@ -1,0 +1,79 @@
+# Module: shared contracts
+Shared constants and contracts every module depends on.
+Generates: `shared/contracts.py` — the canonical, language-neutral constants module and single source of these values. Each service also emits its own copy from a thin wrapper that `<include>`s this spec: `backend/contracts.py`, `orchestrator/contracts.py`, `frontend/src/contracts.ts`.
+
+## Canonical Status Enum (case-sensitive, verbatim — no other values or casings exist)
+`VOTING | CONSOLIDATING | IN_SPRINT | SPLIT | COMPILED | POSTPONED_CONFLICT | ARCHIVED`
+
+## Redis Names
+- `feature_intake` — list queue. Producer: forum backend (`LPUSH`, write-only). Consumer: orchestrator (`BRPOP`, sole reader).
+- `agent_events` — pub/sub, public ticker copy (orchestrator → backend relay).
+- `screening_results` — pub/sub, private per-author notices (orchestrator → backend only; never public). Payload:
+  `{ "feature_id": "<uuid>", "author_id": "<uuid>", "reason": "security" | "off_topic" | "unclear" | "already_shipped", "shipped_version": "<string, only when reason=already_shipped>" }`
+  (`unclear` = Phase-1 coherence drop: the title and description plainly don't describe the same feature.)
+  Content of the pitch is never included.
+- `agent_events` payload: `{ "phase": "screening|synthesizing|architecting|compiling|deployed", "agent_name": "<string>", "message": "<human-readable micro-copy>" }` — the backend relays this into `broadcast_events` verbatim.
+- `pending_pitch:{author_id}:{feature_id}` — author-only unverified pitch record with TTL (screening window; 72h on rejection).
+- `rate:pitch:{author_id}` — rolling 24h counter for the 5-pitches-per-day limit (Pitch Coins).
+- `processed_batches` — set of consumed `batch_id`s for at-least-once idempotency.
+- `intake_attempts:{batch_id}` — redelivery counter (`INCR` per pickup); at `MAX_INTAKE_ATTEMPTS` the batch is dead-lettered instead of looping.
+- `failed_intake:{batch_id}` — dead-letter for a batch that failed screening `MAX_INTAKE_ATTEMPTS` times (envelope + failure metadata). **Redis only, 72h TTL** — holds unscreened content, so it never touches Postgres (same rule as `pending_pitch`).
+
+## Intake Payload Envelope
+```json
+{
+  "batch_id": "<uuid, unique per enqueue>",
+  "features": [
+    { "feature_id": "<uuid>", "title": "<=60 chars>", "description": "<30-300 chars>", "upvotes": 1, "author_id": "<uuid>" }
+  ]
+}
+```
+
+## Pending Pitch Record (value stored at `pending_pitch:{author_id}:{feature_id}`)
+Fields: `feature_id`, `title`, `state`, `submitted_at`; on rejection also `reason` and
+(only when `reason=already_shipped`) `shipped_version`. The pitch **description is never
+stored here** — only the title, which the author already sees in their own UI.
+`state` is one of exactly: `screening | rejected`.
+TTL: `PENDING_PITCH_TTL_SECONDS` on write (screening window + buffer),
+reset to `PENDING_PITCH_REJECTED_TTL_SECONDS` when `state` flips to `rejected`.
+
+## Postgres Tables (summary — authoritative DDL ships with the schema migration)
+- `feature_requests` — id, title, description, status, upvotes, parent_id, split_depth, unlock_threshold, postpone_count, ai_explanation, extends_id, author_id, author_handle (denormalized display name — nullable, no profiles join), created_at, updated_at
+- `feature_votes` — UNIQUE(feature_id, user_id)
+- `broadcast_events` — phase, agent_name, message (pruned ~60 days)
+- `deployments` — version, render_deploy_id, preview_url, shipped_feature_ids
+- `decision_log` — permanent, write-only; feature_id, batch_id, phase, agent, decision jsonb, model_version
+
+## Environment Variable Names (canonical, verbatim — mirrored in `.env.example`)
+Every service reads env through the **name constants** its `contracts` module exports —
+a literal `os.getenv("...")` string in a route, service, or worker module is a contract
+violation. Reading happens at request/startup time; no module caches a client-bearing
+global at import time.
+- Forum backend: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `REDIS_URL`, `RENDER_WEBHOOK_SECRET`,
+  `SANDBOX_ALLOWED_HOSTS`, `SANDBOX_URL` (optional bootstrap), `FORUM_ORIGIN`,
+  `DEV_MODE` (boolean, default `false`).
+- Orchestrator: `REDIS_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `TARGET_PROMPT_DIR`,
+  `COMPILE_COMMAND`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_SCREENING`, `LLM_MODEL_PM`,
+  `LLM_MODEL_ARCHITECT`, `LLM_TEMPERATURE`, `MAX_INTAKE_ATTEMPTS` (default `3`),
+  `MAX_ARCHITECT_ATTEMPTS` (default `2`), `BRPOP_TIMEOUT_SECONDS` (default `5`),
+  `SPRINT_SERVICE_PORT` (default `8010`), `DEPLOY_TIMEOUT` (deploy-poll cycle cap, seconds).
+
+## Fixed Numeric Limits (not env-tunable — compiled into the constants module)
+`TITLE_MAX_LEN = 60` | `DESCRIPTION_MIN_LEN = 30` | `DESCRIPTION_MAX_LEN = 300`
+`INITIAL_UPVOTES = 1` | `PITCH_RATE_LIMIT = 5` per rolling 24h (`PITCH_RATE_WINDOW_HOURS = 24`)
+`CELEBRATION_WINDOW_HOURS = 48` | `PENDING_PITCH_TTL_SECONDS = 3600`
+`PENDING_PITCH_REJECTED_TTL_SECONDS = 259200` (72h) | `FAILED_INTAKE_TTL_SECONDS = 259200` (72h)
+
+## Executable API Contract (frozen asset)
+`prompts/shared/openapi.yaml` is the machine-checkable HTTP contract between frontend and backend — literal schemas for every endpoint, the error envelope, the `429` coin body, and wire naming (**snake_case throughout**, matching Postgres columns so REST bodies and Supabase Realtime rows share one shape). Backend route modules and the frontend `api_client` conform to it; it is never regenerated by a compiler. Conformance tests run per side against this file.
+
+## Deploy-Outcome Feedback (backend → Sprint service)
+There is no dedicated channel: the **Sprint service** (Phase 4 runs there) **polls the `deployments` table and the winner's feature status** after triggering a compile, bounded by the cycle timeout (`DEPLOY_TIMEOUT` env). A new `deployments` row covering the sprint's `feature_ids` = deploy live; timeout with no row (or the feature still `IN_SPRINT` past timeout) = failed sprint → lifecycle rollback. The backend owns `POST /webhooks/render` and the `IN_SPRINT → COMPILED` flip; it never pushes deploy outcomes back to the Sprint service or to Redis. (Local demo: the Sprint service itself polls Render's REST API and self-POSTs that webhook — see `infrastructure/deploy_webhook.prompt` — but the backend still records `COMPILED`.)
+
+## Cross-Cutting Rules
+- Statuses are compared verbatim; variant casing silently matches zero rows.
+- Public reads come exclusively from Postgres; unscreened content lives only in Redis.
+- Unscreened payload text is read by Phase 1 screening only; dropped content is never persisted anywhere, including `decision_log`.
+
+## Testing convention (binds every module that imports these constants — NOT this constants module itself)
+Unit tests **mock all infrastructure** — no live Redis, Postgres/Supabase, or LLM in any unit test. Each module **injects** its Redis client, its Supabase client, and (in orchestration) the LLM via `llm_client`, rather than instantiating hardcoded globals, so tests substitute fakes: `fakeredis` for Redis, a stubbed Supabase client (or `unittest.mock`) for the DB, and `llm_client` replay / a stub for agent verdicts. Tests are **pytest**; assert on the calls, arguments, and returned/mutated structures against the mocks — never on live rows or a real connection. Integration and conformance tests (real infra, schemathesis, end-to-end) are a **separate** layer, not `pdd`-generated unit tests.

@@ -1,0 +1,31 @@
+# Module: app_shell
+Compile unit for the Forum Frontend.
+Generates: `frontend/src/app_shell.tsx` (current hand-authored code is the reference output)
+
+## Role
+Root component: state, tabs, routing between views. Imports the frozen `styles.css` (the visual identity, layout skeleton, and vocabulary lock live in the included design guide).
+
+## Behavior
+- Masthead: brand + tagline; actions row = Pitch Coin chip (🪙 count, tooltip), "🔒 My pitches" button (pending-count badge), "🔥 Pitch a feature" primary CTA.
+- **Pitch Coins**: 5 per day, 1 per submission; at 0, disable the CTA and show a live refresh countdown (never an error); refill with a celebration toast. Server-authoritative in production (a `429` renders as out-of-coins); the local count is presentation only.
+- Tabs: ⚡ Up Next Pipeline · 🏆 Shipped · ⏸ Holding Pattern · 🗄️ The Vault.
+- Pipeline: sort toggle (Highest Upvotes / Newest) + stage filter chips (All + the five pipeline stages, multi-select, friendly empty state). `COMPILED` cards show here only within the 48h celebration window.
+- Shipped: running total blurb + trophy cards, permanent. Holding: blurb + holding cards. Vault: search box + vault cards with reboot.
+- Pending pitches live **only** in the My Pitches dialog — never inline with the public feed.
+- Toasts for: pitched (screening), cleared screening, rejection nudge, unlock, reboot, coin refresh.
+
+## Data
+All reads/writes through the `api_client` module (mock mode supported); statuses are the canonical case-sensitive enum from `prompts/shared/contracts.prompt`.
+
+## Design guide (frozen — enforced every compile)
+<include>prompts/frontend/design_guide.md</include>
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>frontend/src/api_client.ts</include>
+<include>frontend/src/contracts.ts</include>
+<include>frontend/src/components/cards.tsx</include>
+<include>frontend/src/components/broadcast.tsx</include>
+<include>frontend/src/components/sandbox.tsx</include>
+<include>frontend/src/components/submit_modal.tsx</include>
+<include>frontend/src/components/my_pitches_modal.tsx</include>

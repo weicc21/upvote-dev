@@ -1,0 +1,60 @@
+# Module: sprint_service (Sprint trigger entrypoint)
+Compile unit for the Orchestration Service — the **on-demand HTTP** process. One of the two orchestrator entrypoints (the other is `ingestion_service`).
+Generates: `orchestrator/sprint_service.py`
+
+## Role
+The control-plane API that runs one **sprint** (build cycle) per trigger. A minimal **FastAPI** app exposing exactly one operational endpoint — `POST /sprint` — hit by `curl` or a cron entry. It owns the **Threshold Gate**, then composes **`architect.build_spec` (P3-build) → `compiler_writer` (P4) → `lifecycle` (P5)**. It never consumes the intake queue (that is the Ingestion daemon). This endpoint is operational only — it is **not** part of `openapi.yaml` and is never called by the frontend.
+
+## Endpoint: `POST /sprint`
+1. **Single-flight guard (hard requirement)**: a sprint mutates the shared target prompt and triggers one Render deploy — only one may run at a time. If a sprint is already in flight, return **`409`** and do nothing (cron firing on top of a running sprint safely no-ops). Enforce with an atomic claim (below) plus a process/DB lock held for the whole compile.
+2. **Threshold Gate (atomic winner claim)**: select and claim the single build target in one atomic step — flip the highest-voted `'VOTING'` row with `upvotes >= 5` (hackathon value **5**; production target 100) to `'CONSOLIDATING'` via a conditional `UPDATE ... WHERE status='VOTING' AND upvotes >= 5 ORDER BY upvotes DESC, created_at ASC LIMIT 1 RETURNING *` (or `SELECT ... FOR UPDATE SKIP LOCKED` then update). The atomic flip *is* the claim — it prevents two concurrent sprints from picking the same feature. Also fold in at most 3 re-examined `'POSTPONED_CONFLICT'` rows (`postpone_count < 2`, highest upvotes) as eligible candidates. **If nothing qualifies, return `200` with an empty result** (no build this sprint) — not an error.
+3. **Respond `202` immediately, run the rest as a background task**: compile + the `DEPLOY_TIMEOUT`-bounded deploy poll take minutes, so the HTTP caller must not block. Progress is observed on the board / ticker via Realtime.
+
+## Background sprint task (after the 202)
+4. **Build spec (P3-build)**: `architect.build_spec(winner)` — re-validate friction against the *current* target prompt and produce the validated `feature_block`. If it POSTPONEs (the app drifted into a conflict since the pitch was shaped), skip compile and let `lifecycle` reconcile; the winner is already off `'VOTING'`. Apply the `MAX_ARCHITECT_ATTEMPTS` cap on repeated build-pass failures for the same feature (→ `'POSTPONED_CONFLICT'` instead of an infinite re-win/re-fail loop).
+5. **Compile (P4)**: hand the Feature Block to `compiler_writer` — snapshot → append → `CONSOLIDATING → IN_SPRINT` → gated compile (Gates A/B/C) → promote or revert → local deploy-completion self-POST to `/webhooks/render` (see `compiler_writer`).
+6. **Lifecycle (P5)**: at the tail of the sprint, run `lifecycle` — `rollback_unimplemented_features()` (always), then the `enforce_backlog_decay()` + velocity sweep (piggybacks the sprint for MVP; a separate cron entrypoint calling the same functions is equally valid).
+7. Release the single-flight lock.
+
+## Sprint timeline & single-flight lock span
+The lock is acquired **before** the `202` and released only after Phase 5 — it spans the **entire** cycle, and any `POST /sprint` arriving inside that window gets `409`. The steps run **sequentially**; the deploy confirmation is **not** a concurrent loop — it is downstream of the self-POST. (This elaborates the numbered steps above, expanding `compiler_writer`'s compile+deploy into its Render-poll → self-POST → confirm sub-steps.)
+
+```
+POST /sprint ─► [acquire single-flight lock] ─► 202 to caller
+     │
+ ┌───┴─── background task — lock HELD the entire time ────────────────────────────┐
+ │ a. threshold gate: atomic claim winner   → CONSOLIDATING                        │
+ │ b. architect.build_spec                   → Feature Block                        │
+ │ c. compiler_writer: gated compile A/B/C   → append to target prompt, push Render │
+ │ d. compiler_writer: poll Render REST API until `live`   (LOCAL adapter; bounded) │
+ │ e. compiler_writer: self-POST /webhooks/render → backend INSERTs deployments +   │
+ │                     flips COMPILED, returns 204                                   │
+ │ f. confirm the deployments row (DEPLOY_TIMEOUT-bounded) — universal outcome check.│
+ │                     LOCAL: already guaranteed by (e)'s 204, so instant.           │
+ │                     PROD: the ONLY signal — steps d–e don't exist; Render fires    │
+ │                     its own webhook and this poll is how the outcome is learned.   │
+ │ g. lifecycle: rollback if (f) never arrives / times out                          │
+ └───┬─────────────────────────────────────────────────────────────────────────────┘
+     │
+ [release lock] ─► only now can a fresh POST /sprint pass the 409
+```
+
+Steps **c–f live inside `compiler_writer`** (see its Deploy-completion note); (f) is a **sequential** confirmation after (e), never a parallel loop. **Why the deploy confirmation is deliberately the last locked step**: releasing the lock only after `COMPILED` is confirmed guarantees the app is in a fully-consistent shipped state (target prompt updated, `deployments` row written, status flipped) when the *next* sprint starts — so the next `build_spec` reads an app that already includes what just shipped, and shipped-memory dedup sees it. **Two independent guards**: the single-flight lock (*one sprint at a time*) and the atomic winner claim in (a) (*no two sprints grab the same feature*).
+
+## Entry point
+Expose the FastAPI instance as module-level **`app`** (so `uvicorn orchestrator.sprint_service:app` resolves it) and a **`main()`** that calls `uvicorn.run` bound to `SPRINT_SERVICE_PORT` with **`workers=1`**, plus the `__main__` guard. Console script: `sprint-service = orchestrator.sprint_service:main` (root `pyproject.toml`). **Single worker is required**: the in-process single-flight lock assumes one process — with multiple workers, two concurrent `POST /sprint`s could each claim a *different* feature and run two `pdd` compiles against the one shared target prompt. If ever scaled past one worker, the lock must move to Redis/DB.
+
+## Deployment
+Started once and left listening on `SPRINT_SERVICE_PORT` (`uv run --env-file .env sprint-service`). Launch it from a shell where `pdd` is on `PATH` (the Phase-4 compile subprocess runs from here) and `TARGET_PROMPT_DIR` points at the local `streaks-demo` repo. Trigger a build with `curl -X POST localhost:$SPRINT_SERVICE_PORT/sprint` or a cron entry (see the execution playbook for the run order). Env: `SPRINT_SERVICE_PORT`, `TARGET_PROMPT_DIR`, `COMPILE_COMMAND`, `DEPLOY_TIMEOUT`, `MAX_ARCHITECT_ATTEMPTS`, `RENDER_API_KEY`/`RENDER_SERVICE_ID`, the LLM model pins.
+
+## Testability
+FastAPI app with the DB/Redis/llm clients **injected** (as elsewhere) so tests exercise `POST /sprint` against `fakeredis` + a stubbed Supabase + `llm_client` replay: assert the atomic claim flips exactly one row, that a second concurrent call gets `409`, that an empty backlog returns `200`, and that a POSTPONE verdict skips the compile. No live infra in unit tests.
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>orchestrator/contracts.py</include>
+<include>orchestrator/architect.py</include>
+<include>orchestrator/compiler_writer.py</include>
+<include>orchestrator/lifecycle.py</include>
+<include>orchestrator/llm_client.py</include>
+<include>orchestrator/telemetry.py</include>

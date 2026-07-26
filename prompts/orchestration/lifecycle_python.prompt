@@ -1,0 +1,18 @@
+# Module: lifecycle (Phase 5)
+Compile unit for the Orchestration Service. **Runs in the Sprint service** (invoked by `sprint_service` at the tail of each sprint).
+Generates: `orchestrator/lifecycle.py`
+
+## Role
+Deterministic end-of-sprint database maintenance. **No LLM calls in this module.**
+
+## Behavior
+Run these sequentially at the tail of each sprint (`POST /sprint`), after `compiler_writer` reports a successful or failed build:
+1. `rollback_unimplemented_features()` — rows **still in** `'IN_SPRINT'` or `'CONSOLIDATING'` that failed to compile or deploy this run (per the deploy feedback loop) revert to `'VOTING'`. This targets *transient* failures only; a Gate B structural shipped-conflict has already been set to `'POSTPONED_CONFLICT'`/`'ARCHIVED'` by Phase 4 and no longer matches this filter — never pull such a row back to `'VOTING'`.
+2. `enforce_backlog_decay()` — select `'VOTING'` rows with `created_at` older than 30 days.
+3. Velocity audit — for each decayed row, check upvote velocity (total below threshold, or zero recent activity); failures become `'ARCHIVED'`. (Archived rows stay searchable in the Vault; the backend's reboot endpoint may return them to `'VOTING'` with a fresh `created_at`.)
+4. Log every mutation to `decision_log` with `phase='lifecycle'`, `model_version='programmatic'`.
+
+## Dependencies
+<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
+<include>orchestrator/contracts.py</include>
+<include>orchestrator/telemetry.py</include>
