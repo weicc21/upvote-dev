@@ -4,8 +4,10 @@ Generates: `frontend/src/components/sandbox.tsx` (current hand-authored code is 
 
 ## Behavior
 - Sticky side panel housing the `<iframe>` of the live demo app.
-- **Preview source chain**: `GET /api/sandbox` (`preview_url` + `version`, allowlist-validated by the backend) → `VITE_SANDBOX_URL` env (local dev) → self-contained mocked `srcdoc` (standalone fallback).
-- **Refresh semantics**: "Refresh Preview" remounts the iframe (React `key`) and appends `?v={version}` so a stale cached build is never shown.
+- **Preview source chain** — these are two different situations, not one fallback cascade, and must not be conflated:
+  1. **Wired to a real backend** (`api_client` has a base URL, not standalone mock mode): trust `GET /api/sandbox` alone. `status: "live"` → render the iframe from its `preview_url` + `version`. `status: "none"` → **explicit empty state** ("🚀 Nothing shipped yet — upvote a feature to see it appear here!"), never a blank frame and never a fabricated preview; if the response's bootstrap `preview_url` is present (backend-side `SANDBOX_URL`) render that instead of the empty state, since it's still a real, allowlist-validated URL — just not tied to a specific deploy.
+  2. **Standalone mock mode** (no backend configured at all — `api_client` exports the mock implementation): render the self-contained mocked `srcdoc`. This path is a dev/demo convenience and is unreachable once a real backend is wired up; it must never be what a real "nothing shipped yet" state silently degrades into.
+- **Cache-busting applies to every mount, not just the button**: the iframe `src` always carries `?v={version}` — including the very first render — never a bare `preview_url`. Render's static-site URL is stable across deploys (only the content at it changes), so a first-load `src` without `?v=` risks the browser serving a cached bundle from a previous deploy. "Refresh Preview" remounts the iframe (React `key`) with the latest `version` from a fresh `GET /api/sandbox`, so a stale cached build is never shown on refresh either.
 - **Deploy-aware glow**: pulse the button only on a Supabase Realtime INSERT on `deployments` — never on ticker copy or build-started events; stop pulsing after refresh.
 - **Cold start**: show "🔥 Warming up the sandbox..." skeleton until iframe `onLoad`; degrade gracefully on timeout.
 - **Escape hatch**: always render "Open sandbox in new tab ↗" beneath the frame.

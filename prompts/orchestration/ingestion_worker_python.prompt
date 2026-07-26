@@ -8,8 +8,8 @@ Safety + relevancy + coherence screening of one already-dequeued batch. The only
 ## Behavior (given a parsed batch envelope)
 1. Build the **App Identity Digest**: the `# Role and Purpose` and core-feature summary of the target prompt file — its path resolved from the `TARGET_PROMPT_DIR` env var (`${TARGET_PROMPT_DIR}/streaks_demo_typescriptreact.prompt`; never hardcode the directory) — kept under ~150 tokens.
 2. Call `llm_client.call_agent("security_relevance_gatekeeper", ...)` with the digest and the batch. Treat the verdict as content policy — the backend already validated payload shape.
-3. Dropped features (MALICIOUS, OFF_TOPIC, or UNCLEAR — title/description plainly incoherent) are never persisted anywhere: publish one `screening_results` event each (`feature_id`, `author_id`, reason category `security` | `off_topic` | `unclear` — never the content) and write a content-free `decision_log` entry (feature_id, classification, reason category, model version only).
-4. Publish one human-readable `agent_events` micro-copy event (aggregate counts only, e.g., "🛡️ Guardagent is screening 14 new feature requests..."); never echo dropped content.
+3. Dropped features (MALICIOUS, OFF_TOPIC, or UNCLEAR — title/description plainly incoherent) are never persisted anywhere: call `telemetry.publish_screening_result(feature_id, author_id, reason)` for each (reason category `security` | `off_topic` | `unclear` — never the content) and `telemetry.log_decision(...)` with a content-free entry (feature_id, classification, reason category, model version only).
+4. Call `telemetry.publish_agent_event(phase="screening", ...)` once per batch with human-readable copy (aggregate counts only, e.g., "🛡️ Guardagent is screening 14 new feature requests..."); never echo dropped content.
 5. **Read quarantine**: return only the survivor set to the caller (`ingestion_service`, which hands it to `pm_agent`); raw batch content never leaves this module.
 
 ## Error handling (fail-closed — the caller owns redelivery)

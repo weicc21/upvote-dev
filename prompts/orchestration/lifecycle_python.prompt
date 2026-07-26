@@ -8,8 +8,8 @@ Deterministic end-of-sprint database maintenance. **No LLM calls in this module.
 ## Behavior
 Run these sequentially at the tail of each sprint (`POST /sprint`), after `compiler_writer` reports a successful or failed build:
 1. `rollback_unimplemented_features()` — rows **still in** `'IN_SPRINT'` or `'CONSOLIDATING'` that failed to compile or deploy this run (per the deploy feedback loop) revert to `'VOTING'`. This targets *transient* failures only; a Gate B structural shipped-conflict has already been set to `'POSTPONED_CONFLICT'`/`'ARCHIVED'` by Phase 4 and no longer matches this filter — never pull such a row back to `'VOTING'`.
-2. `enforce_backlog_decay()` — select `'VOTING'` rows with `created_at` older than 30 days.
-3. Velocity audit — for each decayed row, check upvote velocity (total below threshold, or zero recent activity); failures become `'ARCHIVED'`. (Archived rows stay searchable in the Vault; the backend's reboot endpoint may return them to `'VOTING'` with a fresh `created_at`.)
+2. `enforce_backlog_decay()` — select `'VOTING'` rows with `created_at` older than `BACKLOG_DECAY_AGE_DAYS` (30). Age alone is only eligibility, not the verdict — a row this old that's still attracting votes must survive; that's what step 3 checks.
+3. Velocity audit — for each age-eligible row, query `feature_votes` for that `feature_id`: no row with `created_at` in the trailing `BACKLOG_DECAY_VELOCITY_WINDOW_DAYS` (14) → zero recent activity → `'ARCHIVED'`. A row that received even one vote inside that window survives this sweep regardless of its total `upvotes`, no matter how old it is. (Archived rows stay searchable in the Vault; the backend's reboot endpoint may return them to `'VOTING'` with a fresh `created_at`.)
 4. Log every mutation to `decision_log` with `phase='lifecycle'`, `model_version='programmatic'`.
 
 ## Dependencies

@@ -217,7 +217,7 @@ components:
         author_handle: { type: [string, "null"], description: Display name; never the auth id }
         parent_id: { type: [string, "null"], format: uuid }
         split_depth: { type: integer, default: 0 }
-        unlock_threshold: { type: [integer, "null"], description: Set on split children; UI renders progress toward it }
+        unlock_threshold: { type: [integer, "null"], description: Set on split children; UI renders progress toward it. Load-bearing, not display-only — this is the row's actual sprint-eligibility vote bar (falls back to SPRINT_VOTE_THRESHOLD when null) }
         extends_id: { type: [string, "null"], format: uuid, description: Shipped base feature this one builds on }
         extends_title: { type: [string, "null"], description: Denormalized base title for the "builds on" chip }
         postpone_count: { type: integer, default: 0 }
