@@ -15,7 +15,10 @@ Root component: state, tabs, routing between views. Imports the frozen `styles.c
 - Toasts for: pitched (screening), cleared screening, rejection nudge, unlock, reboot, coin refresh.
 
 ## Data
-All reads/writes through the `api_client` module (mock mode supported); statuses are the canonical case-sensitive enum from `prompts/shared/contracts.prompt`.
+All reads/writes through the `api_client` module (mock mode supported); statuses are the canonical case-sensitive enum from `prompts/shared/contracts.prompt`. Subscribes via `api_client.subscribe`: `onFeatureUpdate` merges the updated row into whichever list currently holds that `id` (by upvote count, status, or unlock progress) so every open tab reflects an upvote or stage change live, not just the tab that clicked. `onFeatureInsert` branches on `parent_id`: **`null`** → add as a new top-level card to the relevant view; **set** → this is a SPLIT child, so attach/merge it into its parent's `children` array (matched by `parent_id`) instead — never add it as a top-level card, mirroring the read-endpoint invariant that child rows are only ever embedded, rendered inside that parent's `UnlockTree`. A parent's own `onFeatureUpdate` to `status: 'SPLIT'` may arrive before, after, or interleaved with its children's `onFeatureInsert`s (Realtime gives no cross-row ordering guarantee); render whatever subset of `children` has arrived so far rather than waiting for a complete set. A status change that drops a card out of the current view's filter (e.g. `ARCHIVED`) removes it from that view's list; it does not need to appear in a tab that isn't currently mounted/fetched.
+
+## Non-goal
+No polling loop for feature list freshness — Realtime (`onFeatureInsert`/`onFeatureUpdate`) is the only live-update path; `getFeatures` is called on mount/filter-change/pagination only.
 
 ## Design guide (frozen — enforced every compile)
 <include>prompts/frontend/design_guide.md</include>

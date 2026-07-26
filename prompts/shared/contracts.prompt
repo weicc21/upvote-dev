@@ -8,12 +8,12 @@ Generates: `shared/contracts.py` — the canonical, language-neutral constants m
 ## Redis Names
 - `feature_intake` — list queue. Producer: forum backend (`LPUSH`, write-only). Consumer: orchestrator (`BRPOP`, sole reader).
 - `agent_events` — pub/sub, public ticker copy (orchestrator → backend relay).
-- `screening_results` — pub/sub, private per-author notices (orchestrator → backend only; never public). Payload:
-  `{ "feature_id": "<uuid>", "author_id": "<uuid>", "reason": "security" | "off_topic" | "unclear" | "already_shipped", "shipped_version": "<string, only when reason=already_shipped>" }`
-  (`unclear` = Phase-1 coherence drop: the title and description plainly don't describe the same feature.)
+- `screening_results` — pub/sub, private per-author notices (orchestrator → backend only; never public) for any pitch that resolves without becoming its own public row. Payload:
+  `{ "feature_id": "<uuid>", "author_id": "<uuid>", "reason": "security" | "off_topic" | "unclear" | "already_shipped" | "merged", "shipped_version": "<string, only when reason=already_shipped>", "merged_into_feature_id": "<uuid, only when reason=merged>", "merged_into_title": "<string, only when reason=merged>" }`
+  (`unclear` = Phase-1 coherence drop: the title and description plainly don't describe the same feature. `merged` = Phase-2 dedup: this pitch was folded into an existing request rather than rejected — the `feature_id`/`author_id` here are the **incoming duplicate's own**, not the canonical feature's, since that's whose pending record needs the update.)
   Content of the pitch is never included.
 - `agent_events` payload: `{ "phase": "screening|synthesizing|architecting|compiling|deployed", "agent_name": "<string>", "message": "<human-readable micro-copy>" }` — the backend relays this into `broadcast_events` verbatim.
-- `pending_pitch:{author_id}:{feature_id}` — author-only unverified pitch record with TTL (screening window; 72h on rejection).
+- `pending_pitch:{author_id}:{feature_id}` — author-only unverified pitch record with TTL (screening window; 72h once resolved — rejected or merged).
 - `rate:pitch:{author_id}` — rolling 24h counter for the 5-pitches-per-day limit (Pitch Coins).
 - `processed_batches` — set of consumed `batch_id`s for at-least-once idempotency.
 - `intake_attempts:{batch_id}` — redelivery counter (`INCR` per pickup); at `MAX_INTAKE_ATTEMPTS` the batch is dead-lettered instead of looping.
@@ -31,11 +31,14 @@ Generates: `shared/contracts.py` — the canonical, language-neutral constants m
 
 ## Pending Pitch Record (value stored at `pending_pitch:{author_id}:{feature_id}`)
 Fields: `feature_id`, `title`, `state`, `submitted_at`; on rejection also `reason` and
-(only when `reason=already_shipped`) `shipped_version`. The pitch **description is never
+(only when `reason=already_shipped`) `shipped_version`; on merge instead `merged_into_feature_id`
+and `merged_into_title` (denormalized so the "my pitches" tray can link to and label the
+canonical feature with no extra fetch). The pitch **description is never
 stored here** — only the title, which the author already sees in their own UI.
-`state` is one of exactly: `screening | rejected`.
+`state` is one of exactly: `screening | rejected | merged`.
 TTL: `PENDING_PITCH_TTL_SECONDS` on write (screening window + buffer),
-reset to `PENDING_PITCH_REJECTED_TTL_SECONDS` when `state` flips to `rejected`.
+reset to `PENDING_PITCH_REJECTED_TTL_SECONDS` when `state` flips to `rejected` **or** `merged` —
+both are resolved outcomes and share the same 72h author-visibility window before the record expires.
 
 ## Postgres Tables (summary — authoritative DDL ships with the schema migration)
 - `feature_requests` — id, title, description, status, upvotes, parent_id, split_depth, unlock_threshold, postpone_count, ai_explanation, extends_id, author_id, author_handle (denormalized display name — nullable, no profiles join), created_at, updated_at

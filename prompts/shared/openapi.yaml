@@ -236,9 +236,11 @@ components:
       properties:
         feature_id: { type: string, format: uuid }
         title: { type: string }
-        state: { enum: [screening, rejected] }
+        state: { enum: [screening, rejected, merged] }
         reason: { type: [string, "null"], enum: [security, off_topic, unclear, already_shipped, null], description: Set when state=rejected }
         shipped_version: { type: [string, "null"], description: Set when reason=already_shipped }
+        merged_into_feature_id: { type: [string, "null"], format: uuid, description: Set when state=merged — the canonical feature this pitch's vote was folded into }
+        merged_into_title: { type: [string, "null"], description: Denormalized canonical title, set when state=merged, so the tray can render a link with no extra fetch }
         submitted_at: { type: string, format: date-time }
 
     BroadcastEvent:

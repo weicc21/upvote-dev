@@ -7,7 +7,23 @@ Runs the bounded, gated compile loop: writes the validated Feature Block into th
 
 ## The compile loop (one feature per sprint — MVP)
 1. **Snapshot**: commit the target prompt file — path resolved from the `TARGET_PROMPT_DIR` env var (`${TARGET_PROMPT_DIR}/streaks_demo_typescriptreact.prompt`; never hardcode the directory) — git + `build_logs.version_hash`. Every failure path ends in revert-to-snapshot.
-2. Append the Feature Block below `# [COMMUNITY FEATURES INSERTION ZONE]` (headers above untouched); save. Feature `'CONSOLIDATING'` → `'IN_SPRINT'`.
+2. **Render the Feature Block to markdown, then append it** below `# [COMMUNITY FEATURES INSERTION ZONE]` (headers above untouched); save. Feature `'CONSOLIDATING'` → `'IN_SPRINT'`. The target prompt file is a markdown spec document that `pdd sync` compiles — never append the raw `feature_block` JSON from `architect`; render it into the same prose-and-headings shape as every other prompt in this project, as one fixed per-feature template so blocks accumulate as discrete, greppable subsections:
+   ```
+   ### Feature: {title} (`{feature_id}`)
+   **Behavior**: {behavior}
+
+   **Acceptance Criteria**
+   - {acceptance_criteria[0]}
+   - {acceptance_criteria[1]}
+   ...
+
+   **Placement**: {placement}
+   **Data**: {data}
+   **Interactions**: {interactions}
+   **Assumptions**: {assumptions, one per line}
+   **Out of Scope**: {out_of_scope, one per line}
+   ```
+   The `feature_id` in the heading is the anchor later steps grep the file by (dedup/extension lookups, Gate B's regression scan). **Never reformat or reflow a previously-appended block** — Gate B's shipped-feature smoke checklist re-extracts `acceptance_criteria` text from these accumulated blocks and compares it against what was validated at compile time; altering old prose invalidates that comparison.
 3. Regenerate the target app by **shelling out to the compile command** (`COMPILE_COMMAND` env, default `pdd sync streaks_demo`). Three mechanics are load-bearing: (a) **split `COMPILE_COMMAND` into argv with `shlex.split`** before spawning (the env var is one string like `pdd sync streaks_demo`; `create_subprocess_exec` takes separate arguments, and `shlex.split` also handles the absolute-path fallback and any quoted args); (b) launch the subprocess with **`cwd = TARGET_PROMPT_DIR`** — the target repo holds its own `.pddrc`, and pdd resolves config/prompt/output from the working directory, so a wrong cwd makes it fail or compile the wrong thing; (c) use a **non-blocking async subprocess** (`asyncio.create_subprocess_exec(*shlex.split(COMPILE_COMMAND), cwd=TARGET_PROMPT_DIR)`, not blocking `subprocess.run`) — the compile is a slow, LLM-backed call and must not freeze the orchestrator's event loop. The git snapshot in step 1 runs in the same `cwd`. pdd uses PDD Cloud by default (`--local` to run offline). **MVP runs the orchestrator and pdd on the same local machine** (see the orchestration spec), so pdd is resolved from the caller's `PATH` and its stored auth carries over — no container or mount. Regenerate **into the staging context** (e.g. a staging branch/build), never straight to the live preview. pdd is the hackathon compiler; the compile step is swappable via this one env var — point it at a different compiler or a direct-API generate→test loop without touching the rest of the pipeline.
 4. **Gate A — build**: on failure, one repair recompile with the build error appended as context. Hard cap: 2 repair attempts per sprint across all gates.
 5. **Gate B — regression**: run the shipped-feature smoke checklist (accumulated `acceptance_criteria` of every shipped feature). Any regression → **revert immediately, no retry** — protecting the shipped corpus outranks landing the new feature. A Gate B failure is a **structural shipped-conflict, not a transient build error**: route the feature straight to `'POSTPONED_CONFLICT'` (with `ai_explanation` naming the regressed shipped feature) → `postpone_count = 2` → `'ARCHIVED'`, **never back to `'VOTING'`** (a permanently-incompatible feature would otherwise re-vote and re-fail forever). Log the regressed shipped `feature_id`(s) to `decision_log` for future dedup.

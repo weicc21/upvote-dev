@@ -22,7 +22,7 @@ The always-on stream processor: consume the `feature_intake` queue and turn each
 Expose **`main()`** — a thin sync wrapper that runs `asyncio.run(<the loop>)` — plus an `if __name__ == "__main__": main()` guard, so it runs as `python -m orchestrator.ingestion_service` or via the `ingestion-service` console script (`orchestrator.ingestion_service:main`, declared in the root `pyproject.toml`). This is a long-running daemon, **not** an ASGI app — never run it under uvicorn.
 
 ## Deployment
-Started once and left running for the demo (`uv run --env-file .env ingestion-service`). Same machine as `sprint_service` and the `streaks-demo` repo (see the execution playbook for the run order). Env: `REDIS_URL`, `TARGET_PROMPT_DIR`, `BRPOP_TIMEOUT_SECONDS`, `MAX_INTAKE_ATTEMPTS`, the LLM model pins.
+Started once and left running for the demo (`uv run --env-file .env ingestion-service`). Same machine as `sprint_service` and the `streaks-demo` repo. No strict start-order dependency between the two: this daemon only ever writes `'VOTING'` rows (plus `SPLIT`/`POSTPONED_CONFLICT` re-shapes) and never touches a row `sprint_service` has claimed (`'CONSOLIDATING'`/`'IN_SPRINT'`), so either process may be started first or restarted independently; a `sprint_service` cron cycle (see `sprint_service`'s Deployment section) simply finds whatever backlog exists at trigger time. Env: `REDIS_URL`, `TARGET_PROMPT_DIR`, `BRPOP_TIMEOUT_SECONDS`, `MAX_INTAKE_ATTEMPTS`, the LLM model pins.
 
 ## Dependencies
 <!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
