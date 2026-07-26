@@ -11,7 +11,7 @@ The write-only `decision_log` gateway. Every governance decision flows through h
 
 ## Behavior
 - Insert-only against `decision_log`; never UPDATE or DELETE (the table is the permanent evaluator-training dataset).
-- **Content-free rule for dropped features**: screening entries for MALICIOUS/OFF_TOPIC drops carry `feature_id`, classification, reason category, and model version — never the dropped title or description text. Survivors may be referenced by `feature_id` (their content is persisted normally in Phase 2).
+- **Content-free rule for dropped features**: screening entries for MALICIOUS/OFF_TOPIC/UNCLEAR drops carry `feature_id`, classification, reason category, and model version — never the dropped title or description text. Survivors may be referenced by `feature_id` (their content is persisted normally in Phase 2).
 - Telemetry failures never block the pipeline: log a warning and continue, but count failures for ops visibility.
 
 ## Dependencies

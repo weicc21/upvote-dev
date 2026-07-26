@@ -17,18 +17,19 @@ The frontend's single seam to the backend: every HTTP call and Realtime subscrip
 - `subscribe({ onFeatureInsert, onBroadcastEvent, onDeployment })` — Supabase Realtime on `feature_requests`, `broadcast_events`, `deployments`
 
 ## Behavior
+- **Identity bootstrap (no account setup ceremony)**: on module init, restore a persisted Supabase session if one exists; otherwise call `supabase.auth.signInAnonymously()` once and persist the resulting session (Supabase's own storage, e.g. `localStorage`) so the same anonymous identity survives reloads. This runs silently in the background — no sign-in form, no blocking the shell's first render, no user-visible step. The resulting anonymous JWT **is** a Supabase Auth JWT, so it satisfies `security: supabaseJwt` on writes with no backend changes. A same-tab retry (e.g. the anonymous call fails offline) is fine; never fall back to an unauthenticated write.
 - **Conforms to `prompts/shared/openapi.yaml`** (the frozen wire contract, snake_case): request/response bodies match its schemas exactly; test against a spec-driven mock server.
 - **Wire → view-model mapping lives here and only here.** The components use view names that differ from wire names; this module owns the translation so neither side drifts:
   `description` → `scope` · `unlock_threshold` → `needed` · `created_at` → `createdAt` · `shipped_at`/`shipped_version` → `shippedAt`/`shippedVersion` · `merge_count` → `mergeCount` · `ai_explanation` → `aiExplanation` · `postpone_count` → `holdCycle` (with `holdMax` = 2 constant) · `author_handle` → `author` · `viewer_has_voted` → seeds `votedIds`.
   Supabase Realtime rows arrive in wire shape (raw columns); pass them through the same mapper before they reach components.
 - `429` responses carry `resets_at` — feed it to the coin-refresh countdown instead of the mock's hardcoded window.
 - Base URL + Supabase credentials from Vite env; when absent, export the mock implementation (current `data.ts` behavior) so the app stays standalone.
-- Attach the Supabase Auth JWT to writes; reads are anonymous.
+- Attach the Supabase Auth JWT (from the identity bootstrap above — anonymous or a real session, whichever exists) to writes; reads are unauthenticated.
 - Never talk to Redis or Postgres directly — HTTP API + Realtime only (manifest boundary rule).
 - Errors return the backend's friendly copy verbatim for direct display; never leak raw payloads.
 
 ## Testing convention
-Unit tests use **Vitest** + **React Testing Library** + **jsdom** (Vite-native; not Jest). This module is the single backend seam, so component modules are tested against a **stubbed `api_client`** (mock each method) or a spec-driven mock server from `openapi.yaml` — never a live backend. Realtime is mocked by invoking the `subscribe` callbacks (`onFeatureInsert`/`onBroadcastEvent`/`onDeployment`) directly. No unit test hits a live backend or Supabase Realtime.
+Unit tests use **Vitest** + **React Testing Library** + **jsdom** (Vite-native; not Jest). This module is the single backend seam, so component modules are tested against a **stubbed `api_client`** (mock each method) or a spec-driven mock server from `openapi.yaml` — never a live backend. Realtime is mocked by invoking the `subscribe` callbacks (`onFeatureInsert`/`onBroadcastEvent`/`onDeployment`) directly. The identity bootstrap is tested against a stubbed Supabase auth client (`signInAnonymously`/session storage mocked) — no unit test triggers a live anonymous sign-in. No unit test hits a live backend or Supabase Realtime.
 
 ## Dependencies
 <!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->

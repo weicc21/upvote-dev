@@ -183,7 +183,7 @@ paths:
 
 components:
   securitySchemes:
-    supabaseJwt: { type: http, scheme: bearer, description: "Supabase Auth JWT (reads are public; writes require it). DEV_MODE=true replaces this with an X-Dev-User UUID header and skips verification — local/hackathon only, never production." }
+    supabaseJwt: { type: http, scheme: bearer, description: "Supabase Auth JWT (reads are public; writes require it). Satisfied by a Supabase anonymous-auth session (signInAnonymously) as well as a real one — pitching requires no signup/login ceremony, only a resolvable caller id. DEV_MODE=true replaces this with an X-Dev-User UUID header and skips verification — local/hackathon only, never production." }
     webhookSecret: { type: apiKey, in: header, name: X-Webhook-Secret }
 
   responses:
