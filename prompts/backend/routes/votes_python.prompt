@@ -1,0 +1,90 @@
+<pdd-reason>The one-vote-per-user upvote endpoint. The vote row is the durable truth; the count column is a cache of it.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"router","signature":"router: APIRouter","returns":"prefix /api/features, tag votes"},
+  {"name":"upvote_feature","signature":"POST /api/features/{id}/upvote","returns":"200 {feature_id, upvotes} | 404 | 409 | 422"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/backend/deps_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+
+Implement `backend/routes/votes.py`. Requires an identified caller via `get_current_user_id`.
+
+<responsibility>
+Record one vote per user per feature, and report the resulting count.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT push the new count to viewers — Supabase Realtime fans out the row change.
+This module DOES NOT support unvoting; no DELETE route exists in the frozen `openapi.yaml`.
+This module DOES NOT decide what gets built; it only records demand.
+</non_responsibilities>
+
+<vocabulary>
+**Vote row** — a row in `feature_votes`. Its existence is the authoritative answer to "has this
+user voted for this feature", enforced by `unique (feature_id, user_id)`.
+**Count** — `feature_requests.upvotes`. A denormalised cache of the vote rows, maintained by this
+endpoint. It can lag; it is never the source of truth.
+</vocabulary>
+
+<capabilities>
+- MAY read `feature_requests` and insert into `feature_votes`.
+- MAY increment `feature_requests.upvotes`.
+- MUST NOT delete a vote row, call an LLM, or publish to Redis.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Return `200` with exactly `{"feature_id": <uuid>, "upvotes": <int>}` — the two fields
+required by `openapi.yaml`, and no others.
+R2 (MUST): Reject a feature whose `status` is not `VOTING` with `422` and `error.code`
+`not_votable`, before any write.
+R3 (MUST): Detect a repeat vote by letting the `unique (feature_id, user_id)` constraint fail the
+insert, returning `409` with `error.code` `already_voted`. A SELECT-then-INSERT check MUST NOT be
+used — two concurrent clicks would both pass it.
+R4 (MUST): Insert the vote row **before** incrementing the count. The reverse order counts every
+repeat vote that R3 rejects, permanently inflating the total.
+R5 (MUST): Increment with a relative update (`upvotes = upvotes + 1`), never a read-then-write —
+concurrent votes on the same feature would otherwise lose updates.
+R6 (MUST): Once the vote row is inserted, return `200` even when the increment that follows fails —
+with a best-effort count read back from the row, and the drift logged at WARNING.
+The vote is durably recorded and the unique constraint blocks any retry, so surfacing the
+increment failure would strand the caller behind a permanent `409` with no action available.
+R7 (MUST NOT): Return or log `user_id`, `author_id`, or any pitch content.
+R8 (MUST): Return `404` when the id matches no row.
+R9 (MUST NOT): Implement any push, poll, or pub/sub for vote counts.
+</contract_rules>
+
+Every error response is the frozen envelope `{"error": {"code", "message"}}` — never FastAPI's
+default `{"detail"}`.
+
+<pdd>
+Known and accepted for the MVP demo: `schema.sql` is frozen and carries no trigger tying
+`feature_requests.upvotes` to `feature_votes` rows, and the Supabase client offers no transaction
+spanning the two statements. A crash between R4 and R5 undercounts a feature by one, permanently,
+since the voter can never retry past the unique constraint. R6 keeps that invisible to the user
+rather than stranding them. Reconciliation is one statement and belongs in end-of-sprint
+maintenance (`orchestrator/lifecycle.py`, p20):
+  update feature_requests f
+     set upvotes = (select count(*) from feature_votes v where v.feature_id = f.id);
+Emit a TODO at the R6 branch in the generated code pointing at that reconciliation.
+</pdd>
+
+<dependencies>
+<include optional>backend/deps.py</include>
+<include optional>shared/constants.py</include>
+<include select="lines:91-108">prompts/shared/openapi.yaml</include>
+</dependencies>
+
+<coverage>
+R1: story__upvote_a_feature.md
+R2: story__upvote_a_feature.md
+R3: story__upvote_a_feature.md
+R4: TODO — add a test asserting a duplicate vote leaves the count unchanged
+R5: TODO — add a test asserting concurrent votes on one feature lose no updates
+R6: TODO — add a test asserting a failed increment still returns 200
+R7: TODO — add a test asserting no user id appears in a response or log
+R8: story__upvote_a_feature.md
+R9: story__browse_the_pipeline_board.md
+</coverage>

@@ -1,0 +1,182 @@
+<pdd-reason>The pitch intake and public board reads. Accepts a pitch into Redis without ever persisting it, and serves the board from Postgres.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"router","signature":"router: APIRouter","returns":"prefix /api/features, tag features"},
+  {"name":"create_pitch","signature":"POST /api/features","returns":"202 {feature_id, state}"},
+  {"name":"list_features","signature":"GET /api/features","returns":"200 paged board"},
+  {"name":"list_my_pitches","signature":"GET /api/features/mine","returns":"200 {pending, features}"},
+  {"name":"get_feature","signature":"GET /api/features/{feature_id}","returns":"200 Feature | 404"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/backend/deps_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+
+Implement `backend/routes/features.py`. Clients, settings, and caller identity all arrive through
+`Depends` on `backend.deps` — this module constructs nothing.
+
+<responsibility>
+Accept a pitch onto the intake queue, and read the public board.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT screen, dedup, classify, or publish a pitch — the orchestrator owns all four.
+This module DOES NOT write to `feature_requests`; only the orchestrator creates a board row.
+This module DOES NOT call an LLM, ever.
+</non_responsibilities>
+
+<vocabulary>
+**Pitch Coin** — one unit of an author's daily submission allowance, counted at `rate:pitch:{author_id}`.
+**Board row** — a row in `feature_requests`. A pitch becomes one only after it survives screening.
+</vocabulary>
+
+<capabilities>
+- MAY `INCR`/`EXPIRE` the rate key, `LPUSH` to `feature_intake`, and `SET` a pending-pitch record.
+- MAY `SCAN` and read the **calling author's own** pending-pitch records.
+- MAY read `feature_requests`.
+- MUST NOT write, update, or delete any Postgres row.
+- MUST NOT call an LLM or any orchestrator process.
+</capabilities>
+
+## POST /api/features (US-01)
+
+Body `{title, description}`; `title` 1–60 chars, `description` 30–300 (`openapi.yaml`).
+Requires an identified caller via `get_current_user_id`.
+
+<contract_rules>
+R1 (MUST): Return `202` with exactly `{"feature_id": <uuid>, "state": "screening"}` — the frozen
+response shape in `openapi.yaml`, where `state` is the constant `screening`, not a status enum.
+R2 (MUST): Write the `pending_pitch:{author_id}:{feature_id}` record **before** the `LPUSH` to
+`feature_intake`. The orchestrator can screen and publish a result within milliseconds; if the
+record does not exist yet the outcome write silently no-ops and the author's pitch vanishes from
+their own tray (US-06).
+R3 (MUST NOT): Write pitch content to Postgres on any path. Unscreened content lives only in
+Redis, under a TTL.
+R4 (MUST): On exhausted coins return `429` with `{"error": {"code": "out_of_coins", "message": …},
+"resets_at": <ISO-8601>}` — both fields required by `openapi.yaml`; `resets_at` drives the
+frontend countdown, so it MUST be a real timestamp, never null.
+R5 (MUST): Count coins per author per UTC calendar day, so `resets_at` is the next UTC midnight
+and the "try again tomorrow" copy is true.
+R6 (MUST NOT): Return `author_id` in any response body.
+R7 (MUST NOT): Write pitch title or description into a log line or an error message.
+R8 (MUST): Serve reads only from `feature_requests`, so a pitch still in screening and a rejected
+pitch are both invisible here. This is what keeps unscreened content off the public board (US-01).
+R9 (MUST): Take a required `view` of `pipeline | shipped | holding | vault`, an optional
+`sort` of `top` (default, `upvotes` desc) or `new` (`created_at` desc), an optional `limit`
+(default 30, max 100), and an optional opaque `cursor`. These names and values are frozen in
+`openapi.yaml` — `newest`, `page`, or `page_size` are all wrong.
+R10 (MUST): Paginate by **keyset** on the sort column, returning an opaque `cursor` a caller
+passes back. Offset pagination MUST NOT be used: the board reorders live as votes land, so an
+offset silently skips or repeats rows between pages.
+R11 (MUST): Return `{"features": [...]}` plus the cursor. A total count is not in the frozen
+response and MUST NOT be added — counting every matching row on each board load is the expensive
+query on the hottest path.
+R12 (MUST): Reject an unknown `status` value with `400`, and treat `status` as a CSV of canonical
+enum values valid only in the `pipeline` view.
+R13 (MUST): Return `404` when the id matches no row.
+</contract_rules>
+
+## GET /api/features (US-05) and GET /api/features/{feature_id}
+
+Anonymous — `get_optional_user_id`, never `get_current_user_id`. R8–R13 govern these two routes.
+
+## GET /api/features/mine (US-06)
+
+The author's private view. Requires an identified caller via `get_current_user_id`. Two
+independent reads — Redis for what is still in screening, Postgres for what became a board row —
+composed only in the response.
+
+<contract_rules>
+R14 (MUST): Return `{"pending": [...], "features": [...]}`, both keys always present and both
+arrays possibly empty. The frozen shape in `openapi.yaml` has no total, no cursor, and no
+outcome summary.
+R15 (MUST): Scope the Redis scan to the literal prefix `pending_pitch:{caller_id}:*`. Scanning
+all pending keys and filtering by author in Python MUST NOT be used — it walks every author's
+unscreened pitches through this process to answer one author's question, and one bad filter
+leaks them.
+R16 (MUST): Use `SCAN`, never `KEYS`. `KEYS` blocks the single-threaded Redis server for the
+whole keyspace, and this endpoint is polled by every author with a pitch in flight.
+R17 (MUST): Filter out any pending entry whose `feature_id` already appears in the `features`
+array. A pitch that clears screening gets a board row while its Redis record is still inside its
+TTL, so without this the author sees the same pitch twice — once as "screening", once as
+`VOTING` — and the two disagree. This is a reconciliation of two already-fetched result sets, not
+a join: the stores are still queried independently and MUST NOT be joined, cached together, or
+indexed against each other.
+R18 (MUST): Read the Postgres side filtered by `author_id`, and return each row's real `status`
+so `VOTING`, `IN_SPRINT`, and `COMPILED` are distinguishable — those are three of the six
+outcomes US-06 asks for.
+R19 (MUST NOT): Delete, rewrite, or extend a pending record here. This route is read-only over
+Redis: the TTL set at pitch time is the sole mechanism that clears a pending entry, whether the
+pitch passed, was rejected, or was merged.
+R20 (MUST): Declare this route **before** `GET /api/features/{feature_id}` in the module. FastAPI
+matches in declaration order, so a `{feature_id}` route declared first swallows the literal
+`mine` and answers `404` for a valid request. Both routes living in this one module is what keeps
+that ordering a visible, local property.
+R21 (MUST NOT): Accept an author id from the query string, body, or a header. The caller can only
+ever read their own pitches, and the id comes from `get_current_user_id` alone.
+</contract_rules>
+
+In the MVP a pending record's `state` is always `screening`. `openapi.yaml` also permits
+`rejected` and `merged` with a reason and a canonical-feature link; nothing writes them yet, so
+the enum values are reserved rather than dead. A pitch that screening drops is not marked — its
+record simply expires, which is the deliberate scope decision recorded in `<pdd>` below.
+
+Every error response is the frozen envelope `{"error": {"code", "message"}}` — never FastAPI's
+default `{"detail"}`. `code` is machine-readable (`out_of_coins`, `validation_failed`);
+`message` is copy the frontend may display verbatim.
+
+`author_handle` is nullable and this route never populates it: there is no accounts table in the
+MVP (`schema.sql`), so the column stays null until one exists. Do not invent a value.
+
+<pdd>
+Scope decision for the MVP demo, deliberately taken: **screening outcomes are not reported.**
+A pending record is written at pitch time with a TTL and is never updated again. If the pitch
+passes it becomes a board row and R17 hides the stale pending twin; if it is rejected or merged
+the record just expires. That descopes two of US-06's acceptance criteria — "rejected (with
+reason category)" and "merged pitches link to the canonical feature" — in exchange for deleting
+the entire outcome-notification path (the `screening_results` subscriber, the record mutation,
+and the TTL reset) from the MVP.
+
+The cost is time-boxed by exactly one dial: `PENDING_PITCH_TTL_SECONDS`, set to 900 (15 minutes).
+Until it expires, a rejected pitch reads "screening" to its author — so the value is chosen to be
+long enough that a slow screening pass never erases a pitch that is still being worked on, and
+short enough that "still screening" stays plausible to the person reading it. Real screening
+completes in seconds to minutes, so 15 minutes is roughly an order of magnitude of headroom.
+
+Raising it back toward hours re-opens the same wrong answer for that much longer; lowering it
+below a few minutes risks clearing a pending entry while its pitch is genuinely still in the
+queue, which reads to the author as the pitch being thrown away.
+</pdd>
+
+<dependencies>
+<include optional>backend/deps.py</include>
+<include optional>shared/constants.py</include>
+<include select="lines:11-67">prompts/shared/openapi.yaml</include>
+<include select="lines:76-89">prompts/shared/openapi.yaml</include>
+<include select="lines:233-244">prompts/shared/openapi.yaml</include>
+</dependencies>
+
+<coverage>
+R1: story__pitch_a_feature.md
+R2: story__track_my_pitches.md
+R3: story__screen_incoming_pitches.md
+R4: story__pitch_a_feature.md
+R5: story__pitch_a_feature.md
+R6: TODO — add a test asserting author_id never appears in a response body
+R7: TODO — add a test asserting pitch content never reaches a log or error
+R8: story__pitch_a_feature.md
+R9: story__browse_the_pipeline_board.md
+R10: story__browse_the_pipeline_board.md
+R11: story__browse_the_pipeline_board.md
+R12: TODO — add a test asserting an unknown status is rejected with 400, not defaulted
+R13: story__browse_the_pipeline_board.md
+R14: story__track_my_pitches.md
+R15: TODO — add a test asserting another author's pending keys are never scanned or returned
+R16: TODO — add a test asserting SCAN is used and KEYS is not
+R17: story__track_my_pitches.md
+R18: story__track_my_pitches.md
+R19: story__track_my_pitches.md
+R20: TODO — add a test asserting GET /api/features/mine is not answered by the {feature_id} route
+R21: TODO — add a test asserting a supplied author id in the query is ignored
+</coverage>

@@ -15,17 +15,11 @@ contexts:
       budget: 10.0
       max_attempts: 3
 
-  # Shared contracts — the single canonical binding contract every module
-  # depends on (prompts/shared/contracts.prompt). It is the source of truth,
-  # not compiled directly; each service has a thin wrapper prompt that
-  # <include>s it and emits a per-service constants module in that service's
-  # own output dir:
-  #   prompts/backend/contracts_python.prompt        -> backend/contracts.py
-  #   prompts/orchestration/contracts_python.prompt  -> orchestrator/contracts.py
-  #   prompts/frontend/contracts_typescript.prompt   -> frontend/src/contracts.ts
+  # Shared — the frozen vocabulary and settings every service imports.
+  # Output mirrors the prompt tree relative to prompts/shared/:
+  #   prompts/shared/constants_python.prompt -> shared/constants.py
+  #   prompts/shared/config_python.prompt    -> shared/config.py
   # openapi.yaml is a frozen asset (reference/context only — never generated).
-  # generate_output_path here is a fallback only (the canonical prompt is not
-  # generated on its own); it lands any direct build under shared/.
   shared:
     paths:
       - "prompts/shared/**"
@@ -43,9 +37,8 @@ contexts:
   # Forum Frontend — TypeScript React prompts (prompts/frontend/**).
   # Output mirrors the prompt tree relative to prompts/frontend/ under
   # generate_output_path (PDD subpath mirroring):
-  #   prompts/frontend/app_shell_typescriptreact.prompt        -> frontend/src/App.tsx
-  #   prompts/frontend/api_client_typescript.prompt            -> frontend/src/api.ts
-  #   prompts/frontend/contracts_typescript.prompt             -> frontend/src/contracts.ts
+  #   prompts/frontend/app_shell_typescriptreact.prompt        -> frontend/src/app_shell.tsx
+  #   prompts/frontend/api_client_typescript.prompt            -> frontend/src/api_client.ts
   #   prompts/frontend/components/*_typescriptreact.prompt     -> frontend/src/components/*.tsx
   frontend:
     paths:
@@ -61,8 +54,10 @@ contexts:
       budget: 10.0
       max_attempts: 3
 
-  # Forum Backend API — Python prompts (prompts/backend/*_python.prompt)
-  # → backend/ (main.py, event_relay.py) and backend/routes/
+  # Forum Backend API — Python prompts (prompts/backend/**)
+  #   prompts/backend/main_python.prompt            -> backend/main.py
+  #   prompts/backend/deps_python.prompt            -> backend/deps.py
+  #   prompts/backend/routes/*_python.prompt        -> backend/routes/*.py
   backend:
     paths:
       - "prompts/backend/**"

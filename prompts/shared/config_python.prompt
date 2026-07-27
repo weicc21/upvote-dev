@@ -1,0 +1,100 @@
+<pdd-reason>The only module that reads the environment. Typed, validated, fail-fast settings built on the DEFAULT_* fallbacks from shared/constants.py.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"Settings","signature":"class Settings(BaseSettings)","returns":"frozen, validated settings model"},
+  {"name":"settings","signature":"settings: Final[Settings]","returns":"the single module-level instance"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+
+Implement `shared/config.py` with `pydantic_settings.BaseSettings`, reading `.env` then the
+process environment.
+
+<responsibility>
+Read, type, validate, and freeze every runtime setting exactly once at import.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT declare constants — enums, key names, and `DEFAULT_*` values are imported
+from `shared/constants.py` and MUST NOT be restated here.
+This module DOES NOT construct Supabase, Redis, or LLM clients; `backend/deps.py` owns that.
+</non_responsibilities>
+
+<vocabulary>
+**Secret** — `SUPABASE_SERVICE_KEY`, `LLM_API_KEY`, `RENDER_WEBHOOK_SECRET`, `RENDER_API_KEY`.
+**Required** — absence is a startup failure, not a fallback.
+</vocabulary>
+
+<capabilities>
+- MAY read `.env` and `os.environ`, once, at import.
+- MUST NOT perform network or database I/O.
+- MUST NOT write to `.env` or any file.
+</capabilities>
+
+Settings, by group. Required keys have no default and MUST NOT be given one:
+
+| Key | Type | Required | Fallback |
+|---|---|---|---|
+| `SUPABASE_URL` | `str` | yes | — |
+| `SUPABASE_SERVICE_KEY` | `SecretStr` | yes | — |
+| `REDIS_URL` | `str` | yes | — |
+| `LLM_BASE_URL` | `str` | yes | — |
+| `LLM_API_KEY` | `SecretStr` | yes | — |
+| `TARGET_PROMPT_DIR` | `Path` | yes | — |
+| `COMPILE_COMMAND` | `str` | yes | — |
+| `RENDER_WEBHOOK_SECRET` | `SecretStr` | yes | — |
+| `SANDBOX_ALLOWED_HOSTS` | `tuple[str, ...]` | yes | — |
+| `FORUM_ORIGIN` | `str` | yes | — |
+| `SUPABASE_JWT_SECRET` | `SecretStr \| None` | no | `None` |
+| `RENDER_API_KEY` | `SecretStr \| None` | no | `None` |
+| `RENDER_SERVICE_ID` | `str \| None` | no | `None` |
+| `DEV_MODE` | `bool` | no | `False` |
+| `PITCH_COIN_LIMIT` | `int` | no | `DEFAULT_PITCH_COIN_LIMIT` |
+| `UPVOTE_THRESHOLD` | `int` | no | `DEFAULT_UPVOTE_THRESHOLD` |
+| `SPRINT_CADENCE_SECONDS` | `int` | no | `DEFAULT_SPRINT_CADENCE_SECONDS` |
+| `MAX_RETRIES` | `int` | no | `DEFAULT_MAX_RETRIES` |
+| `PENDING_PITCH_TTL_SECONDS` | `int` | no | `DEFAULT_PENDING_PITCH_TTL_SECONDS` |
+
+<contract_rules>
+R1 (MUST): Fail at import when a required key is absent, in one error naming every missing key —
+not the first one only.
+R2 (MUST): Take optional fallbacks from the `DEFAULT_*` constants in `shared/constants.py`; a
+literal fallback value written in this module is a defect even when it currently matches.
+R3 (MUST NOT): Reveal a secret's value through `repr`, `str`, logging, exception messages, or
+serialisation. Secrets are typed `SecretStr` so the default representations are already masked.
+R4 (MUST): Expose `settings` as a frozen instance — mutation after import raises.
+R5 (MUST): Parse `SANDBOX_ALLOWED_HOSTS` from a comma-separated string into a tuple, rejecting an
+empty result, since an empty allow-list would silently permit nothing (US-10).
+R6 (MUST): Default `DEV_MODE` to `False`, so an unset environment enforces JWT verification. When
+true the caller id comes from the `X-Dev-User` header with no verification — spoofable by design.
+R7 (MUST): Reject a non-positive `PITCH_COIN_LIMIT`, `UPVOTE_THRESHOLD`, `SPRINT_CADENCE_SECONDS`,
+`MAX_RETRIES`, or `PENDING_PITCH_TTL_SECONDS` at import rather than at first use.
+R8 (MUST): Require `SUPABASE_JWT_SECRET` when `DEV_MODE` is false, failing at import with the
+other missing keys. It is optional only because `DEV_MODE=true` skips verification entirely — an
+unset secret with verification switched on would fail on the first authenticated request instead
+of at startup, which is the failure this module exists to prevent (`main.py` R7).
+R9 (MUST): Treat `FORUM_ORIGIN` as a single exact origin used to restrict CORS (`main.py` R16).
+`*` MUST be rejected: writes carry a bearer token, so a wildcard origin is not a valid
+configuration even in development.
+</contract_rules>
+
+`SUPABASE_SERVICE_KEY` is the service-role key: `schema.sql` relies on the service role bypassing
+grants and RLS. The anon key is frontend-only and MUST NOT appear here.
+
+<dependencies>
+<include optional>shared/constants.py</include>
+</dependencies>
+
+<coverage>
+R1: TODO — add a test asserting startup names every missing required key at once
+R7: TODO — add a test asserting a non-positive tunable is rejected at import
+R8: story__pitch_a_feature.md
+R9: TODO — add a test asserting a wildcard FORUM_ORIGIN is rejected at import
+R2: story__threshold_triggers_a_sprint.md
+R3: TODO — add a story asserting secrets never surface in logs or errors
+R4: TODO — add a test that mutating settings raises
+R5: story__preview_the_shipped_feature.md
+R6: story__pitch_a_feature.md (no account ceremony)
+</coverage>

@@ -1,46 +1,87 @@
-# Module: deps (dependency-injection seam)
-Compile unit for the Forum Backend API.
-Generates: `backend/deps.py`
+<pdd-reason>The backend's single dependency-injection seam: the providers every route imports and every test overrides.</pdd-reason>
 
-## Role
-The single injection seam shared by every route module and the event relay. Declares
-FastAPI dependency providers and the shared error envelope — **no endpoints, no business
-logic, no queries**. Every route module imports its clients and its caller identity from
-here, so there is exactly one place tests override.
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"get_settings","signature":"def get_settings() -> Settings","returns":"the shared Settings instance"},
+  {"name":"get_supabase","signature":"async def get_supabase() -> AsyncClient","returns":"Supabase async client; raises until bound"},
+  {"name":"get_redis","signature":"async def get_redis() -> redis.asyncio.Redis","returns":"async Redis client; raises until bound"},
+  {"name":"get_current_user_id","signature":"def get_current_user_id(request: Request) -> str","returns":"caller id; 401 when absent"},
+  {"name":"get_optional_user_id","signature":"def get_optional_user_id(request: Request) -> str | None","returns":"caller id, or None"},
+  {"name":"ErrorResponse","signature":"class ErrorResponse(BaseModel)","returns":"the frozen {error:{code,message}} envelope"},
+  {"name":"raise_error","signature":"def raise_error(status: int, code: str, message: str, **extra) -> NoReturn","returns":"raises HTTPException carrying the envelope"}
+]}}
+</pdd-interface>
 
-## Providers
-- `get_supabase()` and `get_redis()` are declared here and **never construct a client**.
-  `main.py` creates the real Supabase and Redis clients once at startup and overrides
-  these via `app.dependency_overrides`; unit tests override them with a stubbed Supabase
-  client and `fakeredis`. A provider that has not been overridden **raises
-  `RuntimeError`** — no module may fall back to building its own client, and no
-  module-level client global exists anywhere in the backend.
-- `get_optional_user_id()` → `str | None` (public reads; `None` when anonymous) and
-  `get_current_user_id()` → the caller id, raising `401` with the standard error envelope
-  when absent. Both read only the id that the `main.py` auth middleware already resolved
-  and stamped on `request.state.user_id` — neither verifies a JWT, and neither reads
-  `DEV_MODE`. That decision belongs to the middleware in `main.py` and is made once.
-- `ErrorResponse` — the shared error envelope model (`error.code` / `error.message`)
-  exactly as `prompts/shared/openapi.yaml` defines it, plus a helper that raises it as an
-  `HTTPException` so every route returns byte-identical error bodies. The `429` variant
-  carries `resets_at`.
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
 
-## Settings
-Env-backed settings are read from `os.environ` **at request time**, using the `*_ENV`
-name constants from `backend/contracts.py` — never a literal env-var string, never cached
-at import. `SANDBOX_ALLOWED_HOSTS` is parsed here once per read into a host-glob matcher
-(`fnmatch`-style, case-insensitive, matched against the parsed hostname) and exposed as
-`sandbox_host_allowed(url) -> bool`, since both `routes/reads.py` and `routes/webhook.py`
-enforce the same allowlist and must not drift.
+Implement `backend/deps.py`. The providers every route depends on, plus the one error shape they
+all return.
 
-## Modules that do not exist
-This is the whole seam. There is **no** `backend.auth`, `backend.config`,
-`backend.database`, `backend.db`, `backend.models`, `backend.redis_client`, or
-`backend.session` module — do not import from any of them, and do not create one.
-There is no ORM: SQLAlchemy is not a project dependency, and Postgres is reached only
-through the `supabase` Python client obtained from `get_supabase()`.
+<responsibility>
+Declare the seam. Every route reaches Supabase, Redis, settings, and caller identity through
+these functions and no other path, and every route errors through one envelope.
+</responsibility>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>backend/contracts.py</include>
-<include>prompts/shared/openapi.yaml</include>
+<non_responsibilities>
+This module DOES NOT construct clients; `main.py` builds them once in its lifespan and binds them.
+This module DOES NOT verify tokens, read headers, or interpret `DEV_MODE` — that is main.py's
+middleware, which resolves identity once for the whole application.
+This module DOES NOT declare an endpoint, run a query, or hold business logic.
+This module DOES NOT import `main.py` — the dependency runs the other way.
+</non_responsibilities>
+
+<vocabulary>
+**Bound** — `main.py` has installed a real client into `app.dependency_overrides` for a provider.
+Before that a provider is *unbound*, which is a programmer error rather than a runtime condition.
+</vocabulary>
+
+<capabilities>
+- MAY read the already-constructed `settings` object from `shared.config`.
+- MAY return clients that `main.py` has bound.
+- MUST NOT open a socket, construct a client, or touch the filesystem — at import or ever.
+- MUST NOT read `os.environ`; `shared/config.py` already did, once.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): `get_supabase` and `get_redis` raise `RuntimeError` while unbound, naming the provider
+and stating that startup binding was missed.
+R2 (MUST NOT): Hold a module-level client instance or a global sentinel — the unbound behaviour
+comes from the function body itself, so there is no global for a test to leave dirty.
+R3 (MUST NOT): Perform any I/O at import time.
+R4 (MUST): `get_current_user_id` reads only `request.state.user_id` and raises
+`HTTPException(401)` when it is absent or falsy.
+R5 (MUST NOT): Inspect a header, decode a JWT, or call an auth service.
+R6 (MUST): `get_optional_user_id` returns `None` for an absent or falsy id and never raises —
+anonymous reads are the norm on the public board (US-05).
+R7 (MUST NOT): Emit a caller id into a log line, exception detail, or response body. The 401 body
+carries a fixed message, so a caller cannot probe which ids exist.
+R8 (MUST): Keep the two failure kinds distinct — an unbound client is `RuntimeError` (the
+programmer erred), a missing identity is `HTTPException(401)` (the client erred). They MUST NOT
+collapse into one status.
+R9 (MUST): Model the error envelope exactly as `openapi.yaml` freezes it — `{"error": {"code",
+"message"}}` — and expose a raiser so every route emits a byte-identical body. FastAPI's default
+`{"detail": ...}` MUST NOT reach a client from any route.
+R10 (MUST): Let the `429` variant carry `resets_at` as a **sibling** of `error`, not a field
+inside it. That is where the frozen schema puts it and where the frontend countdown reads it.
+</contract_rules>
+
+`get_settings` returns the existing `shared.config.settings` instance and MUST NOT re-read the
+environment or build a second `Settings`.
+
+<dependencies>
+<include optional>shared/config.py</include>
+<include select="lines:189-206">prompts/shared/openapi.yaml</include>
+</dependencies>
+
+<coverage>
+R1: TODO — add a test that an unbound provider raises RuntimeError
+R2: TODO — add a test that no module-level client global exists
+R3: TODO — add a test that importing backend.deps opens no connection
+R4: docs/user-stories/US-01-pitch-a-feature.md
+R5: docs/user-stories/US-01-pitch-a-feature.md
+R6: docs/user-stories/US-05-browse-the-pipeline-board.md
+R7: TODO — add a test that no caller id appears in a 401 body or log
+R8: TODO — add a test asserting an unbound provider does not surface as a 401
+R9: docs/user-stories/US-01-pitch-a-feature.md
+R10: docs/user-stories/US-01-pitch-a-feature.md
+</coverage>

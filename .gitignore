@@ -141,3 +141,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# --- PDD local state (regenerated per run; never commit) ---
+.pdd/
+.pdd-archive/
+architecture.json
+litellm_cache.sqlite/
+appendonlydir/
+__pycache__/
+*.py[cod]

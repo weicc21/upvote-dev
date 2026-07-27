@@ -1,0 +1,86 @@
+<pdd-reason>Canonical frozen enums, Redis key names, and table names shared by backend, orchestrator, and frontend. Single source of truth against cross-service drift.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"FeatureStatus","signature":"class FeatureStatus(str, Enum)","returns":"VOTING, CONSOLIDATING, IN_SPRINT, SPLIT, COMPILED, POSTPONED_CONFLICT, ARCHIVED — uppercase values"},
+  {"name":"BroadcastPhase","signature":"class BroadcastPhase(str, Enum)","returns":"screening, synthesizing, architecting, compiling, deployed — lowercase values"},
+  {"name":"DecisionPhase","signature":"class DecisionPhase(str, Enum)","returns":"screening, dedup, friction, compile, deploy, lifecycle — lowercase values"},
+  {"name":"BuildStatus","signature":"class BuildStatus(str, Enum)","returns":"success, failed — lowercase values"},
+  {"name":"DecisionType","signature":"class DecisionType(str, Enum)","returns":"screening_reject, merge, split, postpone, compile_success, compile_failure, archival, already_shipped — lowercase values"},
+  {"name":"RejectionReason","signature":"class RejectionReason(str, Enum)","returns":"security, off_topic, unclear, already_shipped, merged — lowercase values"},
+  {"name":"TABLE_FEATURE_REQUESTS","signature":"Final[str]","returns":"\"feature_requests\""},
+  {"name":"TABLE_FEATURE_VOTES","signature":"Final[str]","returns":"\"feature_votes\""},
+  {"name":"TABLE_BROADCAST_EVENTS","signature":"Final[str]","returns":"\"broadcast_events\""},
+  {"name":"TABLE_DEPLOYMENTS","signature":"Final[str]","returns":"\"deployments\""},
+  {"name":"TABLE_DECISION_LOG","signature":"Final[str]","returns":"\"decision_log\""},
+  {"name":"TABLE_BUILD_LOGS","signature":"Final[str]","returns":"\"build_logs\""},
+  {"name":"REDIS_FEATURE_INTAKE","signature":"Final[str]","returns":"\"feature_intake\""},
+  {"name":"REDIS_AGENT_EVENTS","signature":"Final[str]","returns":"\"agent_events\""},
+  {"name":"REDIS_SCREENING_RESULTS","signature":"Final[str]","returns":"\"screening_results\""},
+  {"name":"REDIS_PENDING_PITCH","signature":"Final[str]","returns":"\"pending_pitch:{author_id}:{feature_id}\" format template"},
+  {"name":"REDIS_PITCH_RATE","signature":"Final[str]","returns":"\"rate:pitch:{author_id}\" format template"},
+  {"name":"DEFAULT_PITCH_COIN_LIMIT","signature":"Final[int]","returns":"5"},
+  {"name":"DEFAULT_UPVOTE_THRESHOLD","signature":"Final[int]","returns":"10"},
+  {"name":"DEFAULT_SPRINT_CADENCE_SECONDS","signature":"Final[int]","returns":"86400 (daily)"},
+  {"name":"DEFAULT_MAX_RETRIES","signature":"Final[int]","returns":"3"},
+  {"name":"DEFAULT_PENDING_PITCH_TTL_SECONDS","signature":"Final[int]","returns":"900 (15 minutes)"}
+]}}
+</pdd-interface>
+
+Implement `shared/constants.py`: the frozen vocabulary every other module imports rather than
+redeclaring.
+
+<responsibility>
+Declare enums, Redis key names, table names, and the default values for tunables.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT read environment variables, apply overrides, or validate configuration.
+`shared/config.py` MUST own all three, importing the `DEFAULT_*` values from here as fallbacks.
+This module DOES NOT know what the deployment is actually configured to.
+This module DOES NOT define status transition rules or a transition guard.
+</non_responsibilities>
+
+<vocabulary>
+**Physical contract** — an identifier that exists in Postgres. Renaming one on either side breaks
+inserts at runtime, not at import. The enum labels and table names below are physical contract.
+</vocabulary>
+
+<contract_rules>
+R1 (MUST): Enum member values reproduce the Postgres labels in `schema.sql` **byte-for-byte**,
+including case. `FeatureStatus` is uppercase; `BroadcastPhase`, `DecisionPhase`, and `BuildStatus`
+are lowercase. Member names may differ in case from values.
+R2 (MUST): Table-name constants reproduce the table names in `schema.sql` verbatim — note
+`feature_requests` and `feature_votes`, not `features` and `votes`.
+R3 (MUST): Every tunable is exposed as a `DEFAULT_`-prefixed constant, so a reader can never
+mistake it for the effective runtime value.
+R4 (MUST NOT): Import anything outside the standard library (`enum`, `typing`).
+R5 (MUST NOT): Read environment variables, open files, or perform any I/O at import time.
+R6 (MUST NOT): Expose mutable module-level state — no bare list, dict, or set.
+R7 (MUST): Keep `REDIS_PENDING_PITCH` and `REDIS_PITCH_RATE` as format templates containing their
+named placeholders, not pre-formatted keys.
+</contract_rules>
+
+Legality of a status change is enforced where the change is made, not here.
+
+`DecisionPhase` is the `decision_log.phase` column. `DecisionType` is the classification recorded
+*inside* the `decision_log.decision` JSON payload (US-12) and is not a Postgres enum — the two are
+different axes and MUST NOT be merged.
+
+`RejectionReason` covers every way a pitch resolves without becoming its own public row, including
+`merged`, which is a dedup outcome rather than a rejection (US-03). It travels on the Redis
+`screening_results` channel and never reaches Postgres.
+
+<dependencies>
+<include select="lines:26-51">schema.sql</include>
+</dependencies>
+
+<coverage>
+R1: story__browse_the_pipeline_board.md
+R2: story__decision_log.md
+R3: story__threshold_triggers_a_sprint.md
+R4: TODO — add a test asserting the module imports with no third-party package installed
+R5: TODO — add a test asserting no I/O at import
+R6: TODO — add a test asserting no mutable module-level state
+R7: story__pitch_a_feature.md
+</coverage>

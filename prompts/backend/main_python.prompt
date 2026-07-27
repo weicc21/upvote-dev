@@ -1,24 +1,158 @@
-# Module: main (FastAPI app wiring)
-Compile unit for the Forum Backend API.
-Generates: `backend/main.py`
+<pdd-reason>The FastAPI application itself: builds the clients, resolves who the caller is, and guarantees the error envelope. The only module that turns configuration into a running service.</pdd-reason>
 
-## Role
-FastAPI application assembly. No business logic lives here.
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"app","signature":"app: FastAPI","returns":"the ASGI application, importable as backend.main:app"},
+  {"name":"lifespan","signature":"@asynccontextmanager async def lifespan(app: FastAPI)","returns":"builds Supabase + Redis, binds them to the deps providers, closes both on shutdown"},
+  {"name":"resolve_caller","signature":"async def resolve_caller(request: Request, call_next) -> Response","returns":"HTTP middleware; stamps request.state.user_id with the caller id or None"}
+]}}
+</pdd-interface>
 
-## Behavior
-- Settings from env, read through the `*_ENV` **name constants** in `backend/contracts.py` (never a literal env string): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `REDIS_URL`, `RENDER_WEBHOOK_SECRET`, `SANDBOX_ALLOWED_HOSTS`, `SANDBOX_URL` (optional bootstrap), `FORUM_ORIGIN`, `DEV_MODE` (boolean, default `false`).
-- CORS: allow `FORUM_ORIGIN` only; the `/webhooks/render` route is excluded from CORS (protected by its shared secret instead).
-- Registers the routers from `routes/reads.py`, `routes/writes.py`, `routes/webhook.py`.
-- **Client injection seam (testability):** the providers themselves live in `backend/deps.py` (`get_supabase`, `get_redis`), which is the single seam every route module imports from. `main.py` creates the Redis and Supabase clients **once at startup** (lifespan) and binds them by installing overrides for those two providers in `app.dependency_overrides` — no module-level client globals, and `main.py` declares no providers of its own. Unit tests override the same two `deps` providers to inject `fakeredis` / a stubbed Supabase client. No route constructs its own client.
-- On startup, launches the `event_relay` background task; on shutdown, cancels it cleanly.
-- Auth middleware: resolves the caller's id for writes (reads are anonymous) and stamps it on `request.state.user_id` — the `get_current_user_id` / `get_optional_user_id` helpers in `backend/deps.py` only read that value, so JWT verification and the `DEV_MODE` decision happen here and nowhere else. When `DEV_MODE=false` (default), verify the Supabase Auth JWT — **a Supabase anonymous-auth session's JWT verifies identically to a fully-registered user's**; the middleware does not branch on the token's `is_anonymous` claim, since pitching only needs a resolvable caller id, not a completed signup. When `DEV_MODE=true`, **skip signature verification** and take the id from the `X-Dev-User` header (a UUID), falling back to a fixed anonymous-session UUID when the header is absent — so `curl` can simulate distinct users/voters without account management. The resolved id is used as `author_id` on pitches and `user_id` on votes. `DEV_MODE=true` is spoofable by design; never enable it in production.
-- **This service never calls an LLM and never touches the target prompt file.**
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/backend/deps_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/backend/routes/features_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/backend/routes/votes_python.prompt</pdd-dependency>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>backend/contracts.py</include>
-<include>backend/deps.py</include>
-<include>backend/routes/reads.py</include>
-<include>backend/routes/writes.py</include>
-<include>backend/routes/webhook.py</include>
-<include>backend/event_relay.py</include>
+Implement `backend/main.py`. Assembly only — every behaviour lives in a route module.
+
+<responsibility>
+Construct the clients once, resolve caller identity once, register the routers, and make every
+error response the frozen envelope.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT implement an endpoint, query Postgres, or touch Redis beyond constructing
+the client — routes own all three.
+This module DOES NOT declare `Depends` providers; `backend/deps.py` declares them and this module
+only binds real clients into them.
+This module DOES NOT read `os.environ`; `shared/config.py` has already read, typed, and frozen
+every setting.
+This module DOES NOT call an LLM or reach the orchestrator, ever.
+</non_responsibilities>
+
+<vocabulary>
+**Binding** — installing a real client into `app.dependency_overrides` for `get_supabase` /
+`get_redis`. Until it happens those providers raise `RuntimeError` by design (deps R1).
+**Caller id** — the UUID string identifying who is making the request, resolved here and nowhere
+else. `None` for an anonymous reader, which is the normal case on the public board.
+**Identified, not registered** — a caller id is proof of a session, not of an account. There is no
+signup, profile, or accounts table in the MVP (US-01).
+</vocabulary>
+
+<capabilities>
+- MAY construct the Supabase and Redis clients, once, in the lifespan.
+- MAY read `request.headers` and verify a JWT — this is the one module allowed to.
+- MUST NOT run a query, publish to Redis, or read a Redis key.
+- MUST NOT define business rules that belong to a route.
+</capabilities>
+
+## Startup and shutdown
+
+<contract_rules>
+R1 (MUST): Build the Supabase and Redis clients exactly once inside an `asynccontextmanager`
+lifespan, and bind them by assigning into `app.dependency_overrides[get_supabase]` and
+`[get_redis]`. A module-level client global MUST NOT exist — a test that imports this module
+must not open a socket.
+R2 (MUST): Close both clients on shutdown, each guarded so a failure closing one still closes the
+other.
+R3 (MUST): Take every value from the imported `settings` object. Re-reading the environment or
+constructing a second `Settings` here is a defect even when the values would match.
+R4 (MUST): Log one WARNING at startup when `DEV_MODE` is true, naming it as spoofable and
+never-for-production. It is the switch that disables signature verification, so its state must be
+visible in the logs of any environment it is on in.
+</contract_rules>
+
+## Caller identity (US-01: no account setup ceremony)
+
+One HTTP middleware resolves the caller and stamps `request.state.user_id`. `backend/deps.py`
+only reads that attribute, so this is the single place identity is decided.
+
+<contract_rules>
+R5 (MUST): Stamp `request.state.user_id` on **every** request — the resolved id, or `None`. It
+MUST always be set, so `get_optional_user_id` never raises `AttributeError` on an anonymous read.
+R6 (MUST NOT): Return `401` from the middleware, ever. A request with no usable credential
+continues with `user_id = None`; whether that is fatal is the route's decision, made by depending
+on `get_current_user_id` (401) or `get_optional_user_id` (None). Rejecting here would break the
+anonymous board reads (US-05) that share the same middleware.
+R7 (MUST): When `DEV_MODE` is false, verify the Supabase JWT signature and expiry using
+`SUPABASE_JWT_SECRET` before trusting any claim, and take the id from the `sub` claim. A
+malformed, expired, or unverifiable token resolves to `None` — never to a partially trusted id.
+R8 (MUST): Treat a Supabase **anonymous** session's JWT as fully valid. It verifies identically to
+a registered user's, and the middleware MUST NOT branch on an `is_anonymous` claim: pitching needs
+a resolvable caller id, not a completed signup. This is the mechanism behind US-01's "no account
+setup ceremony".
+R9 (MUST): When `DEV_MODE` is true, skip verification entirely and take the id from the
+`X-Dev-User` header, falling back to one fixed anonymous-session UUID when the header is absent.
+This is what lets `curl` and the demo act as distinct users with no account management. It is
+spoofable by design and MUST NOT be reachable when `DEV_MODE` is false.
+R10 (MUST NOT): Log, echo, or place a caller id or a raw token in any response body, header, or
+log line — including at DEBUG.
+</contract_rules>
+
+## Error envelope
+
+Both route modules state that every error is `{"error": {"code", "message"}}` and never FastAPI's
+default `{"detail"}`. A route can only honour that for errors it raises itself; validation
+failures, unmatched paths, and unhandled exceptions are produced by the framework. Closing that
+gap is this module's job.
+
+<contract_rules>
+R11 (MUST): Install exception handlers so `RequestValidationError`, `HTTPException`, and any
+unhandled `Exception` all serialise to the envelope from `backend/deps.py`. A `{"detail": ...}`
+body MUST NOT be reachable on any path.
+R12 (MUST): Map a body that fails schema validation to `400` with `error.code`
+`validation_failed` — not FastAPI's default `422`, which `openapi.yaml` reserves for
+`not_votable` on the upvote route. Two different meanings on one status is a bug the frontend
+cannot untangle.
+R13 (MUST): Give the unhandled-`Exception` handler a `500` with fixed, friendly copy and no
+exception text, stack frame, query, or pitch content. Log the detail server-side instead.
+</contract_rules>
+
+## Wiring
+
+<contract_rules>
+R14 (MUST): Register the `features` and `votes` routers, and only those two. Both declare the
+same `/api/features` prefix; that is intended and they compose.
+R15 (MUST): Restrict CORS to `FORUM_ORIGIN` only. A wildcard origin MUST NOT be used — writes
+carry a bearer token.
+R16 (MUST): Expose the app as the module-level name `app`, so the service starts as
+`uvicorn backend.main:app` with no factory argument.
+</contract_rules>
+
+<pdd>
+Scope note: this wires the two route modules that exist. The webhook (`/webhooks/render`, US-10),
+the broadcast relay (US-11), and the sprint trigger (US-07) have no prompt in the current tree —
+their routers are registered when they are written, and R14 is the line to update. Nothing else
+in this module changes when they land, which is the point of keeping assembly this thin.
+
+`/api/features/mine` lives inside `routes/features.py` rather than its own module specifically so
+its declaration order against `/api/features/{feature_id}` is a local, visible property of that
+file instead of a registration-order rule enforced here.
+</pdd>
+
+<dependencies>
+<include optional>shared/config.py</include>
+<include optional>backend/deps.py</include>
+<include optional>backend/routes/features.py</include>
+<include optional>backend/routes/votes.py</include>
+<include select="lines:184-206">prompts/shared/openapi.yaml</include>
+</dependencies>
+
+<coverage>
+R1: TODO — add a test asserting importing backend.main opens no connection
+R2: TODO — add a test asserting both clients close when one raises
+R3: TODO — add a test asserting no second Settings is constructed
+R4: TODO — add a test asserting DEV_MODE=true logs a warning at startup
+R5: docs/user-stories/US-05-browse-the-pipeline-board.md
+R6: docs/user-stories/US-05-browse-the-pipeline-board.md
+R7: docs/user-stories/US-01-pitch-a-feature.md
+R8: docs/user-stories/US-01-pitch-a-feature.md
+R9: docs/user-stories/US-01-pitch-a-feature.md
+R10: TODO — add a test asserting no caller id or token reaches a log or response
+R11: docs/user-stories/US-01-pitch-a-feature.md
+R12: docs/user-stories/US-01-pitch-a-feature.md
+R13: TODO — add a test asserting a 500 body carries no exception text
+R14: docs/user-stories/US-01-pitch-a-feature.md
+R15: TODO — add a test asserting a foreign origin is refused
+R16: TODO — add a test asserting uvicorn can import backend.main:app
+</coverage>
