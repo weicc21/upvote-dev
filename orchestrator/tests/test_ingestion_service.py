@@ -118,6 +118,11 @@ class FakeSupabase:
         return _Rpc()
 
 
+async def _run(raw: str, sb: "FakeSupabase", *, blueprint: str = "BLUEPRINT") -> str:
+    """process_one takes the blueprint threaded down from startup (R29)."""
+    return await svc.process_one(raw, sb, blueprint=blueprint)
+
+
 @pytest.fixture
 def sb() -> FakeSupabase:
     return FakeSupabase()
@@ -129,7 +134,7 @@ def sb() -> FakeSupabase:
 
 async def test_r6_survivor_is_inserted_with_the_payload_feature_id(sb: FakeSupabase) -> None:
     """A fresh uuid would orphan the author's pending entry (US-06)."""
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
     row = sb.inserts[0]["row"]
     assert sb.inserts[0]["table"] == TABLE_FEATURE_REQUESTS
     assert row["id"] == FID
@@ -137,12 +142,12 @@ async def test_r6_survivor_is_inserted_with_the_payload_feature_id(sb: FakeSupab
 
 
 async def test_r6_row_starts_at_one_upvote(sb: FakeSupabase) -> None:
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     assert sb.inserts[0]["row"]["upvotes"] == 1
 
 
 async def test_r7_status_is_voting_from_the_enum(sb: FakeSupabase) -> None:
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     status = sb.inserts[0]["row"]["status"]
     assert status == FeatureStatus.VOTING
     assert status == "VOTING"  # StrEnum: the wire value, not 'FeatureStatus.VOTING'
@@ -150,7 +155,7 @@ async def test_r7_status_is_voting_from_the_enum(sb: FakeSupabase) -> None:
 
 async def test_r9_no_later_phase_columns_are_set(sb: FakeSupabase) -> None:
     """merge_count / extends_id / parent_id belong to dedup and split."""
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     row = sb.inserts[0]["row"]
     for col in ("merge_count", "extends_id", "parent_id", "split_depth", "unlock_threshold"):
         assert col not in row, f"{col} must be left to a later phase"
@@ -172,7 +177,7 @@ async def test_r9_no_later_phase_columns_are_set(sb: FakeSupabase) -> None:
     ],
 )
 async def test_r3_malformed_item_is_dropped_not_raised(raw: str, sb: FakeSupabase) -> None:
-    assert await svc.process_one(raw, sb) == "malformed"
+    assert await _run(raw, sb) == "malformed"
     assert sb.inserts == [], "a malformed item must never reach Postgres"
 
 
@@ -182,7 +187,7 @@ async def test_r2_key_names_are_the_cross_process_contract(sb: FakeSupabase) -> 
         "id": FID, "author_id": AUTHOR, "title": "t",
         "description": "d" * 40, "submitted_at": "2026-07-27T00:00:00Z",
     })
-    assert await svc.process_one(renamed, sb) == "malformed"
+    assert await _run(renamed, sb) == "malformed"
 
 
 # ==========================================================================
@@ -199,7 +204,7 @@ async def test_r5_rejected_pitch_text_never_reaches_the_log(
     monkeypatch.setattr(svc, "screen_pitch", _reject)
 
     with caplog.at_level(logging.DEBUG):
-        await svc.process_one(item(title=SECRET_TITLE, description=SECRET_DESC), sb)
+        await _run(item(title=SECRET_TITLE, description=SECRET_DESC), sb)
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert SECRET_TITLE not in blob and SECRET_DESC not in blob
 
@@ -208,7 +213,7 @@ async def test_r10_accepted_pitch_text_also_stays_out_of_the_log(
     sb: FakeSupabase, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.DEBUG):
-        await svc.process_one(item(title=SECRET_TITLE, description=SECRET_DESC), sb)
+        await _run(item(title=SECRET_TITLE, description=SECRET_DESC), sb)
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert SECRET_TITLE not in blob and SECRET_DESC not in blob
 
@@ -217,7 +222,7 @@ async def test_r10_log_carries_feature_id_and_outcome(
     sb: FakeSupabase, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.INFO):
-        await svc.process_one(item(), sb)
+        await _run(item(), sb)
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert FID in blob and "inserted" in blob
 
@@ -231,14 +236,14 @@ async def test_r8_unique_violation_is_duplicate_not_an_exception(sb: FakeSupabas
     sb.raise_on_insert = APIError(
         {"code": "23505", "message": "duplicate key value violates unique constraint"}
     )
-    assert await svc.process_one(item(), sb) == "duplicate"
+    assert await _run(item(), sb) == "duplicate"
 
 
 async def test_unexpected_db_error_propagates_to_the_loop_handler(sb: FakeSupabase) -> None:
     """Only 23505 is swallowed — a real outage must surface (R13 catches it)."""
     sb.raise_on_insert = APIError({"code": "42P01", "message": "relation does not exist"})
     with pytest.raises(Exception):
-        await svc.process_one(item(), sb)
+        await _run(item(), sb)
 
 
 # ==========================================================================
@@ -353,7 +358,7 @@ async def test_r16_screening_unavailable_is_its_own_outcome(sb: FakeSupabase, mo
         raise ScreeningUnavailable("model unreachable")
     monkeypatch.setattr(svc, "screen_pitch", _boom)
 
-    assert await svc.process_one(item(), sb) == "unavailable"
+    assert await _run(item(), sb) == "unavailable"
     assert sb.inserts == [], "unscreened content must never be published"
 
 
@@ -363,7 +368,7 @@ async def test_r16_unavailable_is_logged_at_error(sb: FakeSupabase, monkeypatch,
     monkeypatch.setattr(svc, "screen_pitch", _boom)
 
     with caplog.at_level(logging.DEBUG):
-        await svc.process_one(item(), sb)
+        await _run(item(), sb)
     assert any(r.levelno >= logging.ERROR for r in caplog.records), "an outage should be ERROR, not INFO"
 
 
@@ -373,7 +378,7 @@ async def test_r4_rejected_verdict_still_drops_without_inserting(sb: FakeSupabas
                        reason=RejectionReason.OFF_TOPIC, detail="not a product idea")
     monkeypatch.setattr(svc, "screen_pitch", _reject)
 
-    assert await svc.process_one(item(), sb) == "rejected"
+    assert await _run(item(), sb) == "rejected"
     assert sb.inserts == []
 
 
@@ -403,7 +408,7 @@ def _classify_as(outcome: Outcome, target_id=None, target_title=None):
 
 async def test_r19_new_unique_inserts_without_extends_columns(sb: FakeSupabase, monkeypatch) -> None:
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
     row = sb.inserts[0]["row"]
     assert "extends_id" not in row and "extends_title" not in row
 
@@ -412,7 +417,7 @@ async def test_r19_extends_shipped_sets_both_extends_columns(sb: FakeSupabase, m
     """extends_title is denormalised so a card renders 'builds on' with no second query."""
     monkeypatch.setattr(svc, "classify",
                         _classify_as(Outcome.extends_shipped, BASE, "Login with email"))
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
     row = sb.inserts[0]["row"]
     assert row["extends_id"] == BASE
     assert row["extends_title"] == "Login with email"
@@ -421,14 +426,14 @@ async def test_r19_extends_shipped_sets_both_extends_columns(sb: FakeSupabase, m
 async def test_r20_duplicate_inserts_no_feature_row(sb: FakeSupabase, monkeypatch) -> None:
     """A merge concentrates demand; a second row would scatter it again."""
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
-    assert await svc.process_one(item(), sb) == "merged"
+    assert await _run(item(), sb) == "merged"
     feature_inserts = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS]
     assert feature_inserts == [], "a duplicate must not create a board row"
 
 
 async def test_r20_duplicate_increments_the_canonical_row_atomically(sb: FakeSupabase, monkeypatch) -> None:
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     assert any(fn == "increment_upvotes" for fn, _ in sb.rpc_calls), \
         "the merge must use the atomic RPC, not a read-then-write"
 
@@ -437,7 +442,7 @@ async def test_r21_merge_writes_a_vote_row_for_the_author(sb: FakeSupabase, monk
     """Without this the merging author is in `upvotes` but has no vote row,
     so viewer_has_voted reads false and they can vote again — one person, two votes."""
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
     assert votes, "no feature_votes row written for the merged author"
     assert votes[0]["row"]["feature_id"] == CANON, "the vote must land on the canonical row"
@@ -446,7 +451,7 @@ async def test_r21_merge_writes_a_vote_row_for_the_author(sb: FakeSupabase, monk
 
 async def test_r23_already_shipped_writes_nothing(sb: FakeSupabase, monkeypatch) -> None:
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.already_shipped, BASE, "Login with email"))
-    assert await svc.process_one(item(), sb) == "already_shipped"
+    assert await _run(item(), sb) == "already_shipped"
     assert sb.inserts == [] and sb.rpc_calls == []
 
 
@@ -455,7 +460,7 @@ async def test_r24_a_raising_classifier_still_publishes(sb: FakeSupabase, monkey
     async def _boom(pitch, **kw):
         raise RuntimeError("classifier exploded")
     monkeypatch.setattr(svc, "classify", _boom)
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
 
 
 async def test_r25_outcomes_are_reported_distinctly(sb: FakeSupabase, monkeypatch) -> None:
@@ -468,7 +473,7 @@ async def test_r25_outcomes_are_reported_distinctly(sb: FakeSupabase, monkeypatc
     ]:
         fresh = FakeSupabase()
         monkeypatch.setattr(svc, "classify", _classify_as(outcome, target, title))
-        seen.add(await svc.process_one(item(), fresh))
+        seen.add(await _run(item(), fresh))
     assert seen == {"inserted", "merged", "already_shipped"}
 
 
@@ -481,7 +486,7 @@ async def test_r18_candidate_sets_are_read_before_classifying(sb: FakeSupabase, 
                               target_id=None, target_title=None, detail="t")
 
     monkeypatch.setattr(svc, "classify", _spy)
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     assert "backlog" in captured, "classify was called without candidate sets"
 
 
@@ -490,7 +495,7 @@ async def test_r20_rpc_is_called_with_exactly_row_id(sb: FakeSupabase, monkeypat
     parameter fails at runtime with PGRST202, which is how the merge silently
     stopped transferring votes while still reporting success."""
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     calls = [c for c in sb.rpc_calls if c[0] == "increment_upvotes"]
     assert calls, "increment_upvotes was never called"
     assert set(calls[0][1]) == {"row_id"}, f"wrong argument set: {sorted(calls[0][1])}"
@@ -502,7 +507,7 @@ async def test_r26_insert_writes_the_authors_vote_row(sb: FakeSupabase, monkeypa
     vote exists only as a number — the author can upvote their own pitch and be
     counted twice, which a live run demonstrated."""
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
 
     votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
     assert votes, "no vote row written for the author of a new feature"
@@ -513,7 +518,7 @@ async def test_r26_insert_writes_the_authors_vote_row(sb: FakeSupabase, monkeypa
 async def test_r26_every_upvote_is_backed_by_a_vote_row(sb: FakeSupabase, monkeypatch) -> None:
     """Both paths that add to `upvotes` must add the row that justifies it."""
     monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
-    await svc.process_one(item(), sb)
+    await _run(item(), sb)
     feature = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS][0]["row"]
     votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
     assert feature["upvotes"] == len(votes), \
@@ -536,4 +541,141 @@ async def test_r27_duplicate_vote_row_does_not_fail_the_insert(sb: FakeSupabase,
         return q
 
     monkeypatch.setattr(sb, "table", _table)
-    assert await svc.process_one(item(), sb) == "inserted"
+    assert await _run(item(), sb) == "inserted"
+
+
+# ==========================================================================
+# R28-R35 — the shape stage (US-08 intake half)
+# ==========================================================================
+
+from orchestrator.architect import ChildSpec, Friction, Shape  # noqa: E402
+
+
+def _shape_as(status, children=(), explanation="because", friction=Friction.green):
+    async def _s(pitch, **kw):
+        return Shape(feature_id=pitch.get("feature_id", ""), friction=friction,
+                     status=status, children=tuple(children), explanation=explanation)
+    return _s
+
+
+@pytest.fixture(autouse=True)
+def _default_shape(monkeypatch):
+    """Default: green-lit, so the pre-existing insert tests still describe the insert."""
+    monkeypatch.setattr(svc, "decide_shape", _shape_as(FeatureStatus.VOTING))
+    monkeypatch.setattr(svc, "load_blueprint", lambda *a, **k: "BLUEPRINT")
+
+
+async def test_r30_status_comes_from_the_shape_not_a_constant(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "decide_shape",
+                        _shape_as(FeatureStatus.POSTPONED_CONFLICT, friction=Friction.red))
+    assert await _run(item(), sb) == "postponed"
+    row = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS][0]["row"]
+    assert row["status"] == FeatureStatus.POSTPONED_CONFLICT
+
+
+async def test_r31_postponed_row_carries_the_explanation(sb: FakeSupabase, monkeypatch) -> None:
+    """A POSTPONED_CONFLICT row with a null explanation is indistinguishable from a bug."""
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "decide_shape",
+                        _shape_as(FeatureStatus.POSTPONED_CONFLICT,
+                                  explanation="needs a backend, which the app forbids",
+                                  friction=Friction.red))
+    await _run(item(), sb)
+    row = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS][0]["row"]
+    assert row.get("ai_explanation")
+
+
+async def test_r32_split_inserts_parent_and_children(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    kids = [ChildSpec(title="Part one", description="First half of the idea."),
+            ChildSpec(title="Part two", description="Second half of the idea.")]
+    monkeypatch.setattr(svc, "decide_shape",
+                        _shape_as(FeatureStatus.SPLIT, children=kids, friction=Friction.yellow))
+    assert await _run(item(), sb) == "split"
+
+    rows = [i["row"] for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS]
+    parent = [r for r in rows if r.get("parent_id") in (None, "")]
+    children = [r for r in rows if r.get("parent_id")]
+    assert len(parent) == 1 and parent[0]["status"] == FeatureStatus.SPLIT
+    assert len(children) == 2
+    assert all(c["parent_id"] == FID for c in children)
+    assert all(c["status"] == FeatureStatus.VOTING for c in children)
+
+
+async def test_r32_children_inherit_the_author(sb: FakeSupabase, monkeypatch) -> None:
+    """An orphaned child cannot be traced back to the idea it came from (US-06)."""
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "decide_shape", _shape_as(
+        FeatureStatus.SPLIT, children=[ChildSpec(title="A", description="first piece"),
+                                       ChildSpec(title="B", description="second piece")]))
+    await _run(item(), sb)
+    children = [i["row"] for i in sb.inserts
+                if i["table"] == TABLE_FEATURE_REQUESTS and i["row"].get("parent_id")]
+    assert all(c["author_id"] == AUTHOR for c in children)
+
+
+async def test_r33_children_start_at_zero_with_no_vote_rows(sb: FakeSupabase, monkeypatch) -> None:
+    """One pitch, one vote. Seeding three children would make one person three votes."""
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "decide_shape", _shape_as(
+        FeatureStatus.SPLIT, children=[ChildSpec(title="A", description="first piece"),
+                                       ChildSpec(title="B", description="second piece")]))
+    await _run(item(), sb)
+    children = [i["row"] for i in sb.inserts
+                if i["table"] == TABLE_FEATURE_REQUESTS and i["row"].get("parent_id")]
+    assert all(c["upvotes"] == 0 for c in children)
+    votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
+    assert len(votes) <= 1, "only the parent may carry the author's vote"
+
+
+async def test_r28_merge_skips_the_architect(sb: FakeSupabase, monkeypatch) -> None:
+    """No row is created, so shaping it would spend a reasoning call on nothing."""
+    called = {"n": 0}
+
+    async def _spy(pitch, **kw):
+        called["n"] += 1
+        return Shape(feature_id="", friction=Friction.green,
+                     status=FeatureStatus.VOTING, children=(), explanation="")
+
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    monkeypatch.setattr(svc, "decide_shape", _spy)
+    assert await _run(item(), sb) == "merged"
+    assert called["n"] == 0
+
+
+async def test_r28_already_shipped_skips_the_architect(sb: FakeSupabase, monkeypatch) -> None:
+    called = {"n": 0}
+
+    async def _spy(pitch, **kw):
+        called["n"] += 1
+        return Shape(feature_id="", friction=Friction.green,
+                     status=FeatureStatus.VOTING, children=(), explanation="")
+
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.already_shipped, BASE, "Login"))
+    monkeypatch.setattr(svc, "decide_shape", _spy)
+    assert await _run(item(), sb) == "already_shipped"
+    assert called["n"] == 0
+
+
+async def test_r34_a_raising_architect_still_publishes(sb: FakeSupabase, monkeypatch) -> None:
+    """A screened, deduped pitch must not be lost to an architect outage."""
+    async def _boom(pitch, **kw):
+        raise RuntimeError("architect exploded")
+
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "decide_shape", _boom)
+    assert await _run(item(), sb) == "inserted"
+
+
+async def test_r35_outcomes_stay_distinct(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    seen = set()
+    for status, kids in [(FeatureStatus.VOTING, ()),
+                         (FeatureStatus.POSTPONED_CONFLICT, ()),
+                         (FeatureStatus.SPLIT, [ChildSpec(title="A", description="one"),
+                                                ChildSpec(title="B", description="two")])]:
+        fresh = FakeSupabase()
+        monkeypatch.setattr(svc, "decide_shape", _shape_as(status, children=kids))
+        seen.add(await _run(item(), fresh))
+    assert seen == {"inserted", "postponed", "split"}

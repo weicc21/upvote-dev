@@ -2,7 +2,7 @@
 
 <pdd-interface>
 {"type":"module","module":{"functions":[
-  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate' | 'unavailable' | 'merged' | 'already_shipped'"},
+  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient, *, blueprint: str) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate' | 'unavailable' | 'merged' | 'already_shipped' | 'postponed' | 'split'"},
   {"name":"run","signature":"async def run(stop: asyncio.Event | None = None) -> None","returns":"the BRPOP loop; returns when stop is set"},
   {"name":"main","signature":"def main() -> None","returns":"console-script entrypoint; wraps asyncio.run(run())"}
 ]}}
@@ -12,11 +12,13 @@
 <pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/screener_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/pm_agent_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/architect_python.prompt</pdd-dependency>
 
 Implement `orchestrator/ingestion_service.py` — a long-running process, not an ASGI app.
 
-Import the two agents by symbol — `from orchestrator.pm_agent import classify` and
-`from orchestrator.screener import screen_pitch` — not as modules. One import style, so a
+Import the three agents by symbol — `from orchestrator.pm_agent import classify`,
+`from orchestrator.screener import screen_pitch`, and
+`from orchestrator.architect import decide_shape, load_blueprint` — not as modules. One import style, so a
 regeneration does not silently move where the seam is.
 
 Import the screener as `from orchestrator.screener import screen_pitch`. The Python package is
@@ -36,7 +38,8 @@ This module DOES NOT serve HTTP or import from `backend/`; Redis is the only cha
 This module DOES NOT write, update, or delete a `pending_pitch:*` record — the API writes it once and its TTL alone clears it.
 This module DOES NOT notify an author of any outcome; the MVP reports no screening result.
 This module DOES NOT judge duplication — `pm_agent.classify` owns that decision; this module only applies it.
-This module DOES NOT split a feature or set an unlock threshold — those are US-08.
+This module DOES NOT judge buildability — `architect.decide_shape` owns that; this module applies it.
+This module DOES NOT write a feature block or acceptance criteria; that is sprint-time work.
 </non_responsibilities>
 
 <vocabulary>
@@ -81,6 +84,14 @@ R22 (MUST): Treat a unique-violation on that vote insert as already-counted — 
 R23 (MUST): On `already_shipped`, insert nothing and report `already_shipped`. The feature exists; adding a row would invite the community to vote for work already done.
 R24 (MUST NOT): Let a dedup failure lose a pitch. `classify` falls back to `new_unique` by contract, so an outage produces a possibly-duplicate row rather than silence — and if it ever raises, treat it as `new_unique` here rather than dropping the item.
 R25 (MUST): Report each outcome under its own tag — `inserted`, `merged`, `already_shipped` — never collapsing them into one. A merge and an insert are different things happening to the community's demand signal, and a single counter would hide which the pipeline is actually doing.
+R28 (MUST): Call `decide_shape` only when a row is actually going to be created — after `new_unique` or `extends_shipped`, never for `duplicate` or `already_shipped`. Those two write no feature row, so shaping them would spend a reasoning-model call to decide the status of something that does not exist.
+R29 (MUST): Load the blueprint once at startup via `load_blueprint()` and pass it to every `decide_shape` call. Reading the target prompt file per item adds a filesystem round-trip to every pitch, and the file changes only when a sprint compiles.
+R30 (MUST): Insert with the status the shape returns — `VOTING`, `SPLIT`, or `POSTPONED_CONFLICT` — never a hardcoded `VOTING`. This is the whole point of the stage: the community must not be asked to vote on something that cannot be built.
+R31 (MUST): Write the shape's `explanation` to `ai_explanation` on the row whenever the status is not `VOTING`. It is the only thing an author is ever told about why their feature was postponed or split, and a `POSTPONED_CONFLICT` row with a null explanation is indistinguishable from a bug.
+R32 (MUST): On `SPLIT`, insert the parent with status `SPLIT` and then one `VOTING` child row per returned child, each carrying `parent_id` = the parent's id and inheriting the parent's `author_id`. Inheriting the author is what keeps the children in their originator's tray (US-06); an orphaned child is a feature nobody can trace back to the idea it came from.
+R33 (MUST): Give split children `upvotes` 0 and no vote row, and keep the author's single vote on the parent. The author pitched one idea, so they get one vote — seeding each of three children with a vote would turn one person into three votes and break the invariant that every upvote is backed by a vote row.
+R34 (MUST): Treat a `decide_shape` failure as `VOTING` and continue. The contract already falls back that way; if it raises anyway, a screened and deduped pitch must still reach the board rather than be lost to an architect outage.
+R35 (MUST): Report `postponed` and `split` as their own outcome tags. A postponed feature and a votable one are different results for the author, and collapsing them into `inserted` hides how much of the board the gate is holding back.
 </contract_rules>
 
 <pdd>
@@ -110,6 +121,7 @@ the cheap half of the guarantee.
 <include optional>shared/config.py</include>
 <include optional>orchestrator/screener.py</include>
 <include optional>orchestrator/pm_agent.py</include>
+<include optional>orchestrator/architect.py</include>
 <include select="lines:56-84">schema.sql</include>
 </dependencies>
 
@@ -141,4 +153,12 @@ R24: docs/user_stories/story__dedup_against_existing_features.md
 R25: docs/user_stories/story__decision_log.md
 R26: docs/user_stories/story__upvote_a_feature.md
 R27: docs/user_stories/story__upvote_a_feature.md
+R28: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R29: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R30: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R31: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R32: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R33: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R34: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R35: docs/user_stories/story__architect_writes_acceptance_criteria.md
 </coverage>

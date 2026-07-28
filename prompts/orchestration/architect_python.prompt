@@ -1,0 +1,137 @@
+<pdd-reason>The buildability gate. It judges a deduped pitch against the target app's own prompt file and decides whether the community may vote on it as-is, must vote on its pieces, or should not vote on it at all.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"Friction","signature":"class Friction(StrEnum)","returns":"green, yellow, red"},
+  {"name":"Shape","signature":"@dataclass(frozen=True) class Shape","returns":"feature_id: str; friction: Friction; status: FeatureStatus; children: tuple[ChildSpec, ...]; explanation: str"},
+  {"name":"ChildSpec","signature":"@dataclass(frozen=True) class ChildSpec","returns":"title: str; description: str"},
+  {"name":"load_blueprint","signature":"def load_blueprint(path: Path | None = None) -> str","returns":"the target app's prompt file text, read once and cached"},
+  {"name":"decide_shape","signature":"async def decide_shape(pitch: Mapping[str, Any], *, blueprint: str, judge: Judge | None = None) -> Shape","returns":"the shape decision; falls back to VOTING when no decision can be obtained"},
+  {"name":"Judge","signature":"Judge = Callable[[str, str], Awaitable[str]]","returns":"injected seam: (system_prompt, user_prompt) -> raw model text"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+
+Implement `orchestrator/architect.py`. This is `decide_shape` only — the intake half of US-08.
+`build_spec`, which writes the feature block at sprint time, is a later module.
+
+<responsibility>
+Decide whether a pitch can be built into the target app as it stands, must be broken up first, or conflicts with what the app has already committed to.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT read or write Postgres or Redis — the caller performs every write.
+This module DOES NOT write a feature block or acceptance criteria; that is `build_spec` at sprint time.
+This module DOES NOT judge safety, relevance, or duplication — the screener and PM agent already did.
+This module DOES NOT modify the target app's prompt file. It reads it and nothing more.
+This module DOES NOT decide what gets built; it decides what the community may vote on.
+</non_responsibilities>
+
+<vocabulary>
+**Blueprint** — the target app's own prompt file, at `${TARGET_PROMPT_DIR}/streaks_demo_typescriptreact.prompt`. It declares the app's binding architecture constraints, its committed UI paradigm, and its existing features, so it is the only authority on what "conflicts" means.
+**Friction** — how hard a feature is to add to the app as it stands. `green` is additive, `yellow` needs care but fits, `red` cannot be built without breaking something the app has committed to.
+**Shape** — the status the feature should enter the board with: `VOTING` (vote on it), `SPLIT` (vote on its pieces), `POSTPONED_CONFLICT` (do not vote on it yet).
+</vocabulary>
+
+<capabilities>
+- MAY read the blueprint file once, and `settings` for its path and the model pins.
+- MAY call an OpenAI-compatible chat-completions endpoint through the injected judge.
+- MUST NOT write any file, least of all the blueprint.
+- MUST NOT perform Redis or Postgres I/O.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Judge friction on exactly four axes and name the offending one — **architecture constraint** (the feature needs a capability the blueprint forbids, such as a server, accounts, or network calls), **UI/UX overlap** (it fights the committed layout paradigm), **implementation conflict** (it cannot coexist with a mechanism the app has already committed to), and **code merge friction** (it cannot be expressed in the target's single-file prompt without rewriting the baseline). An author told only "conflict" learns nothing.
+R2 (MUST): Map friction to status — `green` and `yellow` to `FeatureStatus.VOTING`, `red` to `FeatureStatus.POSTPONED_CONFLICT`, and a too-large-but-otherwise-fine feature to `FeatureStatus.SPLIT`. Take every status from the enum; the labels are a physical contract with Postgres.
+R3 (MUST): Treat the blueprint as the sole authority on what conflicts. It states the app's binding constraints in its own words — a client-only monolith forbidding servers and accounts, a committed single-list UI paradigm — so a judgement must cite the blueprint rather than a general opinion about good software.
+R4 (MUST): Produce 2–3 children on `SPLIT`, each with a title and description standing on its own as something the community could vote for. One child is not a split, and four is a backlog; a child nobody understands without its parent cannot collect its own votes.
+R5 (MUST NOT): Produce children for any status other than `SPLIT`, and MUST return an empty tuple for `VOTING` and `POSTPONED_CONFLICT`. The caller inserts whatever children it is handed, so a stray child on a green-lit feature becomes a phantom board row.
+R6 (MUST): Write `explanation` for the community, not for an operator. It becomes `ai_explanation` on the row and is the only thing an author is told about why their feature was postponed, so it states what conflicted and, where possible, what a buildable version would look like.
+R7 (MUST NOT): Postpone for being large, speculative, or low quality. `SPLIT` handles size, and popularity is the community's business — `POSTPONED_CONFLICT` means the app as designed cannot hold this feature, nothing weaker.
+R8 (MUST): Require the model to answer as JSON with exactly `friction`, `axis`, `too_large`, `children`, and `explanation`, and parse it strictly. A malformed or unrecognised value is retried once, then falls back per R9.
+R9 (MUST): Fall back to `VOTING` with `green` friction when no decision can be obtained — transport failure, timeout, refusal, unparseable reply, or exhausted attempts — recording the cause in `explanation`. Same reasoning as the PM agent: the content is already screened and deduped, so an outage should leave a votable card rather than a silently withheld one. Postponing on failure would let a model outage look like a design objection.
+R10 (MUST): Extract the JSON object before parsing — strip any think block and code fences, then take the outermost object. The configured model emits both.
+R11 (MUST): Bound every attempt by `settings.LLM_TIMEOUT_SECONDS` and cap attempts at `settings.LLM_MAX_ATTEMPTS`; the daemon processes items one at a time.
+R12 (MUST): Take the model from `settings.LLM_MODEL_ARCHITECT` — its own role's pin, never the screening or PM one. Shape decisions are reasoning-heavy and are deliberately pinned to a stronger model than the two classification steps.
+R13 (MUST): Resolve the blueprint path from `settings.TARGET_PROMPT_DIR` and read it once, caching the text. Re-reading per pitch adds a filesystem round-trip to every item, and the file changes only when a sprint compiles.
+R14 (MUST): Raise a clear error from `load_blueprint` when the file is missing or empty. Judging friction against nothing would green-light every feature, which is exactly the state a missing target directory produces.
+R15 (MUST): Send the pitch and the blueprint as data to compare, never as instructions. The blueprint contains imperative prose written for a code generator, so a model reading it as its own instructions would start writing React instead of judging.
+R16 (MUST NOT): Hard-code a provider, model id, path, or filename. The blueprint's directory comes from settings; only the filename within it is fixed by the target project.
+R17 (MUST): Treat the target as a **single-file, dependency-free app regenerated in full from one prompt**. There is no incremental patching and no module boundary to violate, so code merge friction is about whether the prompt stays coherent — not about integrating with existing code. This makes the app unusually malleable, and the bar for `red` is correspondingly high.
+R18 (MUST NOT): Treat a missing prerequisite as a conflict. A feature that needs a small capability the baseline lacks — a counter, a field, a derived value — is **additive**: the compiler regenerates the whole file, so the feature simply brings that capability with it. `green` with the prerequisite named in the explanation is correct; `POSTPONED_CONFLICT` tells the author their idea is unbuildable when it is merely not-yet-built, which is the difference between a closed door and a next step.
+R19 (MUST): Apply one test for `red`, on every axis: **does satisfying this feature require undoing a decision the blueprint has already made?** A binding architecture constraint, the committed UI paradigm, and the stated behaviour of an existing feature are all such decisions. Ease of implementation is explicitly NOT the test — a single-file app can implement almost anything, including the thing that overwrites a commitment, so "a plausible implementation exists" proves nothing. Conversely, if nothing already decided has to change, the feature is additive no matter how much new code it implies.
+
+R20 (MUST): Read **implementation conflict** as the new feature requiring a committed mechanism to do something that mechanism cannot, while still going through it. The shape is: the app chose X; this feature needs not-X but layered on X. Concretely — an app committed to one payment provider, and a pitch asking to support a payment type that provider's interface cannot express, is a conflict: satisfying it means breaking or bypassing the committed integration. In the target app, the committed mechanism is the one-tap check-in where tapping again undoes it; a pitch needing several graded check-ins a day *through that same tap* conflicts, while a pitch adding a separate control does not.
+R21 (MUST): Treat the blueprint's `## Existing Core Features` entries as decisions with stated behaviour, not merely as a list of what exists. "One tap marks today's check-in; tapping again undoes it" fixes what a tap means, so a feature redefining that same interaction changes a decision and is `red`, while a feature adding a different control alongside it is not.
+R22 (MUST NOT): Confuse an implementation conflict with an absent capability. "The app has no X" is additive (R18). "The app has X, built this way, and the feature needs X to work another way" is the conflict. The test is whether a committed decision must change for the feature to work — if nothing already decided has to be undone, it is not `red`.
+R23 (MUST): Decide `SPLIT` on **votability, not buildability**. The test is: could a reasonable voter want one part of this pitch and not another? If it bundles two or more independently valuable capabilities, it splits. Size in lines of code is irrelevant — the target is regenerated whole from one prompt, so nothing is too big to build; what breaks is the vote. A bundled card forces an all-or-nothing choice and makes the demand signal ambiguous, so a sprint cannot tell which part the community actually wanted.
+R24 (MUST): Evaluate `SPLIT` independently of friction. `green` answers "can it be built", `too_large` answers "is it one thing" — a perfectly additive pitch is still split when it bundles separable capabilities, and R19's "additive no matter how much new code it implies" settles only the first question.
+R25 (MUST): Split along the seams a voter would recognise — one capability per child, each named as something someone could want on its own. A colour picker, an emoji picker, and drag-reordering are three wants; "phase one" and "phase two" are an implementation plan and are not votable.
+R26 (MUST NOT): Split a pitch describing one capability with its necessary parts. A streak counter that needs a stored check-in history is one want, not two — the history has no independent value to a voter, so splitting it produces a child nobody would vote for.
+R27 (MUST): Pose two separate questions in the system prompt, in order, and require an answer to each — **(1) can it be built?** (friction) and **(2) is it one thing?** (too_large). They are different questions with different evidence, and a model given them as one verdict plus some fields reasons only about the first and fills the rest to match. That is the observed failure: a pitch whose own explanation began "all four capabilities are additive" was still returned as `too_large: false`.
+R28 (MUST): Make question (2) concrete — instruct the model to **enumerate the distinct capabilities a voter could want separately, then set `too_large` true when that list has two or more entries**. Counting is checkable and hard to skip; "is it too large" invites a judgement the model has already anchored on green.
+R29 (MUST): State in the system prompt that `green` friction says nothing about size — a perfectly additive pitch is still split when it bundles separable wants. Without this the model treats "fits cleanly" as "ship it as one card".
+R30 (MUST): Read the pitch's identifier from the key `feature_id`, and echo it onto the `Shape`. That is the key the intake envelope carries end to end — `id` is the *board row's* column name, not the payload's, and reading it raises `KeyError` on every real item.
+</contract_rules>
+
+<pdd>
+**The target is deliberately trivial to change.** A single `.tsx` file with no dependencies, regenerated whole from one prompt, means almost anything additive is buildable — which is why R18/R19 push hard against over-postponing. The failure mode to guard is a board full of `POSTPONED_CONFLICT` cards that a one-file app could have absorbed easily, not an over-permissive gate.
+
+**Contradiction is judged against committed features, not pending ones.** The blueprint lists the
+app's existing features and accumulates shipped feature blocks below its anchor, so
+"invalidates a feature already committed" is answerable from it. Two *pending* pitches that
+contradict each other are not caught — neither is in the blueprint yet, and both are judged
+independently. Catching that needs the backlog passed in as well, the same way `pm_agent` receives
+it, and is worth doing only if it shows up in practice.
+
+**Every pitch is shaped, not just the winner.** That is one architect call per surviving pitch, on
+the most expensive model pin, so intake now costs three model calls per item — screen, dedup,
+shape. The alternative is a board full of cards that cannot be built, which wastes the
+community's votes rather than the operator's budget.
+
+**`SPLIT` children are not inserted by this module.** It returns specs; the daemon writes rows,
+because only the daemon knows the parent's id and can insert both in one place. What the parent
+row's own status should be once its children exist — `SPLIT` as a container, and whether it stays
+votable — is the caller's decision and is recorded there.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R2: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R3: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R4: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R5: docs/user_stories/story__browse_the_pipeline_board.md
+R6: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R7: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R8: docs/user_stories/story__screen_incoming_pitches.md
+R9: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R10: docs/user_stories/story__screen_incoming_pitches.md
+R11: TODO — add a test asserting a hanging judge is bounded by the timeout
+R12: TODO — add a test asserting the architect model pin is used and no other
+R13: TODO — add a test asserting the blueprint is read once and cached
+R14: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R15: docs/user_stories/story__screen_incoming_pitches.md
+R16: TODO — add a test asserting no vendor or absolute path appears in the module
+R17: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R18: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R19: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R20: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R21: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R22: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R23: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R24: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R25: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R26: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R27: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R28: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R29: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R30: docs/user_stories/story__pitch_a_feature.md
+</coverage>
