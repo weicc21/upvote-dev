@@ -2,12 +2,12 @@
 
 <pdd-interface>
 {"type":"module","module":{"functions":[
-  {"name":"FeatureStatus","signature":"class FeatureStatus(str, Enum)","returns":"VOTING, CONSOLIDATING, IN_SPRINT, SPLIT, COMPILED, POSTPONED_CONFLICT, ARCHIVED — uppercase values"},
-  {"name":"BroadcastPhase","signature":"class BroadcastPhase(str, Enum)","returns":"screening, synthesizing, architecting, compiling, deployed — lowercase values"},
-  {"name":"DecisionPhase","signature":"class DecisionPhase(str, Enum)","returns":"screening, dedup, friction, compile, deploy, lifecycle — lowercase values"},
-  {"name":"BuildStatus","signature":"class BuildStatus(str, Enum)","returns":"success, failed — lowercase values"},
-  {"name":"DecisionType","signature":"class DecisionType(str, Enum)","returns":"screening_reject, merge, split, postpone, compile_success, compile_failure, archival, already_shipped — lowercase values"},
-  {"name":"RejectionReason","signature":"class RejectionReason(str, Enum)","returns":"security, off_topic, unclear, already_shipped, merged — lowercase values"},
+  {"name":"FeatureStatus","signature":"class FeatureStatus(StrEnum)","returns":"VOTING, CONSOLIDATING, IN_SPRINT, SPLIT, COMPILED, POSTPONED_CONFLICT, ARCHIVED — uppercase values"},
+  {"name":"BroadcastPhase","signature":"class BroadcastPhase(StrEnum)","returns":"screening, synthesizing, architecting, compiling, deployed — lowercase values"},
+  {"name":"DecisionPhase","signature":"class DecisionPhase(StrEnum)","returns":"screening, dedup, friction, compile, deploy, lifecycle — lowercase values"},
+  {"name":"BuildStatus","signature":"class BuildStatus(StrEnum)","returns":"success, failed — lowercase values"},
+  {"name":"DecisionType","signature":"class DecisionType(StrEnum)","returns":"screening_reject, merge, split, postpone, compile_success, compile_failure, archival, already_shipped — lowercase values"},
+  {"name":"RejectionReason","signature":"class RejectionReason(StrEnum)","returns":"security, off_topic, unclear, already_shipped, merged — lowercase values"},
   {"name":"TABLE_FEATURE_REQUESTS","signature":"Final[str]","returns":"\"feature_requests\""},
   {"name":"TABLE_FEATURE_VOTES","signature":"Final[str]","returns":"\"feature_votes\""},
   {"name":"TABLE_BROADCAST_EVENTS","signature":"Final[str]","returns":"\"broadcast_events\""},
@@ -59,6 +59,13 @@ R5 (MUST NOT): Read environment variables, open files, or perform any I/O at imp
 R6 (MUST NOT): Expose mutable module-level state — no bare list, dict, or set.
 R7 (MUST): Keep `REDIS_PENDING_PITCH` and `REDIS_PITCH_RATE` as format templates containing their
 named placeholders, not pre-formatted keys.
+R8 (MUST): Derive every string enum from `enum.StrEnum`, never from a `(str, Enum)` mixin. On
+Python 3.12 a mixin renders `str(member)` and `f"{member}"` as `ClassName.MEMBER`, so
+interpolating one into a Redis key, a query filter, or a payload silently emits
+`FeatureStatus.VOTING` where Postgres expects `VOTING` — the exact byte-for-byte break R1 exists
+to prevent, and one that reads correctly at every call site.
+R9 (MUST): Guarantee `str(member) == member.value` and `f"{member}" == member.value` for all six
+enums, so a member is substitutable for its wire string anywhere without an explicit `.value`.
 </contract_rules>
 
 Legality of a status change is enforced where the change is made, not here.
@@ -83,4 +90,6 @@ R4: TODO — add a test asserting the module imports with no third-party package
 R5: TODO — add a test asserting no I/O at import
 R6: TODO — add a test asserting no mutable module-level state
 R7: story__pitch_a_feature.md
+R8: story__browse_the_pipeline_board.md
+R9: story__browse_the_pipeline_board.md
 </coverage>

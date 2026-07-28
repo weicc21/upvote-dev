@@ -10,7 +10,7 @@
 <pdd-dependency>prompts/backend/deps_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
 
-Implement `backend/routes/votes.py`. Requires an identified caller via `get_current_user_id`.
+Implement `backend/routes/votes.py`. Import the injection seam from `backend.deps` — that is the module's name; `backend.dependencies` does not exist. Requires an identified caller via `get_current_user_id`.
 
 <responsibility>
 Record one vote per user per feature, and report the resulting count.
@@ -45,7 +45,7 @@ insert, returning `409` with `error.code` `already_voted`. A SELECT-then-INSERT 
 used — two concurrent clicks would both pass it.
 R4 (MUST): Insert the vote row **before** incrementing the count. The reverse order counts every
 repeat vote that R3 rejects, permanently inflating the total.
-R5 (MUST): Increment with a relative update (`upvotes = upvotes + 1`), never a read-then-write —
+R5 (MUST): Increment by calling the `increment_upvotes(row_id uuid)` Postgres function via `supabase.rpc(...)`, which performs `upvotes = upvotes + 1` server-side and returns the new count. PostgREST cannot express a column-referencing update, so a read-then-write is the only alternative and it loses updates when two people vote at once —
 concurrent votes on the same feature would otherwise lose updates.
 R6 (MUST): Once the vote row is inserted, return `200` even when the increment that follows fails —
 with a best-effort count read back from the row, and the drift logged at WARNING.
@@ -60,12 +60,16 @@ Every error response is the frozen envelope `{"error": {"code", "message"}}` —
 default `{"detail"}`.
 
 <pdd>
-Known and accepted for the MVP demo: `schema.sql` is frozen and carries no trigger tying
-`feature_requests.upvotes` to `feature_votes` rows, and the Supabase client offers no transaction
-spanning the two statements. A crash between R4 and R5 undercounts a feature by one, permanently,
-since the voter can never retry past the unique constraint. R6 keeps that invisible to the user
-rather than stranding them. Reconciliation is one statement and belongs in end-of-sprint
-maintenance (`orchestrator/lifecycle.py`, p20):
+Known and accepted for the MVP demo: `feature_requests.upvotes` is a denormalised cache with no
+trigger tying it to `feature_votes`, and the Supabase client offers no transaction spanning the
+vote insert and the counter increment. A crash between R4 and R5 undercounts a feature by one,
+permanently, since the voter can never retry past the unique constraint. R6 keeps that invisible
+to the user rather than stranding them.
+
+The increment itself is atomic — `increment_upvotes` (schema.sql) runs `upvotes = upvotes + 1` in
+a single statement, so concurrent voters serialise on the row lock and none is lost. What is not
+atomic is the pair of statements. Reconciliation is one statement and belongs in end-of-sprint
+maintenance (`orchestrator/lifecycle.py`):
   update feature_requests f
      set upvotes = (select count(*) from feature_votes v where v.feature_id = f.id);
 Emit a TODO at the R6 branch in the generated code pointing at that reconciliation.

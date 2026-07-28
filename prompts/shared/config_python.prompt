@@ -78,6 +78,11 @@ of at startup, which is the failure this module exists to prevent (`main.py` R7)
 R9 (MUST): Treat `FORUM_ORIGIN` as a single exact origin used to restrict CORS (`main.py` R16).
 `*` MUST be rejected: writes carry a bearer token, so a wildcard origin is not a valid
 configuration even in development.
+R10 (MUST): Annotate `SANDBOX_ALLOWED_HOSTS` as `Annotated[tuple[str, ...], NoDecode]` (importing
+`NoDecode` from `pydantic_settings`) so the raw environment string reaches the `mode="before"`
+validator in R5. Without it pydantic-settings JSON-decodes any complex-typed field before
+validation, so a comma-separated value raises `SettingsError` at import and R5's parser never
+runs — the setting is unreadable in every environment, including production.
 </contract_rules>
 
 `SUPABASE_SERVICE_KEY` is the service-role key: `schema.sql` relies on the service role bypassing
@@ -92,6 +97,7 @@ R1: TODO — add a test asserting startup names every missing required key at on
 R7: TODO — add a test asserting a non-positive tunable is rejected at import
 R8: story__pitch_a_feature.md
 R9: TODO — add a test asserting a wildcard FORUM_ORIGIN is rejected at import
+R10: story__preview_the_shipped_feature.md
 R2: story__threshold_triggers_a_sprint.md
 R3: TODO — add a story asserting secrets never surface in logs or errors
 R4: TODO — add a test that mutating settings raises
