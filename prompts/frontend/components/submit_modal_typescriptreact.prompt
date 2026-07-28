@@ -17,3 +17,7 @@ Generates: `frontend/src/components/submit_modal.tsx` (current hand-authored cod
 <!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
 <include>frontend/src/api_client.ts</include>
 <include>frontend/src/contracts.ts</include>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+</dependencies>

@@ -76,6 +76,7 @@ Emit a TODO at the R6 branch in the generated code pointing at that reconciliati
 </pdd>
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include optional>backend/deps.py</include>
 <include optional>shared/constants.py</include>
 <include select="lines:91-108">prompts/shared/openapi.yaml</include>

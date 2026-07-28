@@ -36,3 +36,7 @@ Unit tests use **Vitest** + **React Testing Library** + **jsdom** (Vite-native; 
 <!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
 <include>prompts/shared/openapi.yaml</include>
 <include>frontend/src/contracts.ts</include>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+</dependencies>

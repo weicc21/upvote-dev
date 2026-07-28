@@ -79,6 +79,7 @@ different axes and MUST NOT be merged.
 `screening_results` channel and never reaches Postgres.
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include select="lines:26-51">schema.sql</include>
 </dependencies>
 

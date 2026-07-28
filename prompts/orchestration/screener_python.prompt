@@ -1,0 +1,77 @@
+<pdd-reason>The gate between an unscreened pitch and the public board. A pure verdict function, so the daemon that calls it stays free of judgement logic and an LLM can replace the stub without touching the queue loop.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"Verdict","signature":"@dataclass(frozen=True) class Verdict","returns":"feature_id: str; passed: bool; reason: RejectionReason | None; detail: str"},
+  {"name":"screen_pitch","signature":"def screen_pitch(pitch: Mapping[str, Any]) -> Verdict","returns":"the decision for one pitch; never raises for content reasons"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+
+Implement `orchestrator/screener.py`. Step 1 of US-02 is deterministic — no LLM, no network. The
+LLM gatekeeper arrives in step 2 behind this exact signature.
+
+<responsibility>
+Decide whether one pitch may become a public feature request, and say why when it may not.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT read or write Redis — the caller owns the queue and every key.
+This module DOES NOT touch Postgres, insert a row, or know that Postgres exists.
+This module DOES NOT publish events, notify an author, or decide a rejected pitch's fate.
+This module DOES NOT dequeue or retry; the daemon owns the loop.
+This module DOES NOT call an LLM in step 1 — the seam exists so step 2 can, unchanged.
+</non_responsibilities>
+
+<vocabulary>
+**Verdict** — the whole output. `passed=True` means the pitch may become a `VOTING` row; `passed=False` means it is dropped and never persisted anywhere.
+**Pure function** — same input, same verdict, no I/O. That is what lets this be tested without a queue, a database, or a model, and what lets the daemon treat screening as one call.
+</vocabulary>
+
+<capabilities>
+- MAY inspect the pitch's `title` and `description`.
+- MAY return any `RejectionReason` member from `shared.constants`.
+- MUST NOT perform I/O of any kind — no socket, file, database, or model call.
+- MUST NOT mutate the pitch it is given.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Return a `Verdict` for every input, including malformed ones. A pitch missing `title` or `description`, or carrying non-string values, is `passed=False` with reason `unclear` — never an exception, because the daemon's only alternatives are to crash the loop or invent a policy of its own.
+R2 (MUST): Take the reason from the `RejectionReason` enum in `shared.constants` verbatim — `security`, `off_topic`, `unclear`. A bare string such as `"unsafe"` or `"incoherent"` MUST NOT be returned; those are not members and would break every consumer that compares against the enum.
+R3 (MUST NOT): Return `already_shipped` or `merged`. Both are dedup outcomes owned by the PM agent (US-03), so emitting them here would misattribute a dedup result to the safety gate.
+R4 (MUST): In step 1, pass every structurally valid pitch. This screener exists to prove the pipeline, so it rejects only what it can judge without a model: missing or non-string fields, and text outside the frozen `openapi.yaml` bounds — title 1–60, description 30–300.
+R5 (MUST): Echo the input `feature_id` onto the verdict, so the daemon can correlate a decision with the queue item it came from without threading the pitch through separately.
+R6 (MUST): Keep `detail` short, factual, and free of the pitch's own text. It is an operator log line, not author-facing copy, and unscreened content must not travel into logs (US-02 keeps it out of every durable store).
+R7 (MUST NOT): Read configuration, the environment, or module-level mutable state. A verdict depends only on its argument, so two callers in one process cannot influence each other.
+R8 (MUST): Keep `screen_pitch` synchronous. It performs no I/O, so `async def` would advertise a suspension point that does not exist and force every future caller to await it.
+</contract_rules>
+
+<pdd>
+Step 2 replaces the body of `screen_pitch` with an LLM gatekeeper judging safety and topical
+relevance against the target app, and R4 relaxes accordingly. The signature, the `Verdict` shape,
+and R1–R3 plus R5–R8 are written to survive that change untouched, so neither the daemon nor its
+tests move.
+
+When the LLM lands it can fail — a refusal, a malformed reply, an exhausted retry. The rule then
+is fail-closed: no verdict means no `passed=True`, because admitting unscreened content because a
+model was unavailable is the single outcome US-02 exists to prevent. Step 1 has no such failure
+mode, so that rule is deliberately not written yet.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include select="lines:33-66">prompts/shared/openapi.yaml</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__screen_incoming_pitches.md
+R2: docs/user_stories/story__screen_incoming_pitches.md
+R3: docs/user_stories/story__dedup_against_existing_features.md
+R4: docs/user_stories/story__screen_incoming_pitches.md
+R5: docs/user_stories/story__screen_incoming_pitches.md
+R6: docs/user_stories/story__screen_incoming_pitches.md
+R7: TODO — add a test asserting the verdict depends only on the argument
+R8: TODO — add a test asserting screen_pitch is not a coroutine function
+</coverage>

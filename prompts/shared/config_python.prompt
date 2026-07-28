@@ -89,6 +89,7 @@ runs — the setting is unreadable in every environment, including production.
 grants and RLS. The anon key is frontend-only and MUST NOT appear here.
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include optional>shared/constants.py</include>
 </dependencies>
 

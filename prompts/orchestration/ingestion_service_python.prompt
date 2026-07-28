@@ -1,0 +1,112 @@
+<pdd-reason>The daemon that closes the loop: it drains `feature_intake` and turns surviving pitches into public `VOTING` rows. Without it a pitch reaches the queue and dies there.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate'"},
+  {"name":"run","signature":"async def run(stop: asyncio.Event | None = None) -> None","returns":"the BRPOP loop; returns when stop is set"},
+  {"name":"main","signature":"def main() -> None","returns":"console-script entrypoint; wraps asyncio.run(run())"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/screener_python.prompt</pdd-dependency>
+
+Implement `orchestrator/ingestion_service.py` — a long-running process, not an ASGI app.
+
+Import the screener as `from orchestrator.screener import screen_pitch`. The Python package is
+`orchestrator/`; `orchestration/` is the prompt directory and is not importable.
+
+Build the Supabase client with `from supabase._async.client import create_client` — the installed
+supabase-py exports `create_client`, not `create_async_client`, and `backend/main.py` already
+binds it the same way.
+
+<responsibility>
+Consume the intake queue, screen each pitch, and persist the survivors as public feature rows.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT judge a pitch — `screener.screen_pitch` owns every verdict.
+This module DOES NOT serve HTTP or import from `backend/`; Redis is the only channel between the API and this process.
+This module DOES NOT write, update, or delete a `pending_pitch:*` record — the API writes it once and its TTL alone clears it.
+This module DOES NOT notify an author of any outcome; the MVP reports no screening result.
+This module DOES NOT dedup, merge, split, or call an LLM — those are US-03 and later.
+</non_responsibilities>
+
+<vocabulary>
+**Intake item** — one JSON string on the `feature_intake` list, written by `POST /api/features`. Its keys are exactly `feature_id`, `author_id`, `title`, `description`, `submitted_at`.
+**Survivor** — a pitch whose verdict is `passed=True`. Only survivors reach Postgres.
+**Board row** — a `feature_requests` row. A pitch becomes public the moment one is inserted, so the insert is the last step of handling an item, never the first.
+</vocabulary>
+
+<capabilities>
+- MAY `BRPOP` from `feature_intake` and insert into `feature_requests`.
+- MAY read `settings` from `shared.config` and construct its own Supabase and Redis clients.
+- MUST NOT write any Redis key — this process is a queue consumer, not a producer.
+- MUST NOT update or delete an existing `feature_requests` row.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Consume with `BRPOP` on the key from `shared.constants.REDIS_FEATURE_INTAKE`, using a bounded timeout so a stop signal is noticed within one timeout rather than blocking forever. On timeout, loop.
+R2 (MUST): Parse each item as JSON carrying exactly the keys the API writes — `feature_id`, `author_id`, `title`, `description`, `submitted_at`. These names are the contract between two processes that never import each other, so renaming one silently strands every pitch.
+R3 (MUST): Treat an unparseable or non-object item as `malformed` — log at WARNING with length only, drop it, continue. One bad item MUST NOT stop the daemon, because `BRPOP` is destructive and a crash loop would drain the queue into nothing.
+R4 (MUST): Call `screen_pitch` for every well-formed item and act only on its verdict. A rejected pitch is dropped: not inserted, not written back to Redis, not retried.
+R5 (MUST NOT): Persist a rejected pitch's title or description anywhere, logs included. Unscreened content lives only in Redis under the API's TTL, and that invariant is what keeps it off the public board (US-02).
+R6 (MUST): Insert a survivor into `feature_requests` using the payload's own `feature_id` as the primary key, its `author_id`, status `VOTING`, and `upvotes` 1. Reusing the id is what lets the author's tray match the new row to their pending entry (US-06); a fresh uuid would orphan it.
+R7 (MUST): Take the status from `FeatureStatus.VOTING`, never the literal string. The enum is a physical contract with the Postgres type and the only guard against a casing drift that matches zero rows.
+R8 (MUST): Treat a unique-violation on insert as `duplicate` — log at INFO and continue. A redelivered id must never raise, and the primary key is what makes the insert idempotent.
+R9 (MUST NOT): Set `merge_count`, `extends_id`, `parent_id`, `split_depth`, or `unlock_threshold`. Each belongs to a later phase, and a value invented here would be indistinguishable from a real dedup or split result.
+R10 (MUST): Log one line per item at INFO carrying `feature_id` and the outcome tag, never the pitch text. This log is the only visibility into the daemon and is what shows a queue draining during a demo.
+R11 (MUST): Build the Supabase and Redis clients once at startup and close both on shutdown. A client per item would open a connection per pitch.
+R12 (MUST): Handle `SIGINT` and `SIGTERM` by setting the stop event and letting the in-flight item finish, so shutdown never abandons a pitch between its `BRPOP` and its insert.
+R13 (MUST): Keep an unexpected exception on one item from killing the loop — log it with the `feature_id`, drop the item, continue. The daemon's uptime is what the whole pipeline depends on.
+R14 (MUST): Expose `main()` as a sync wrapper over `asyncio.run(run())` with an `if __name__ == "__main__"` guard, so it runs as `python -m orchestrator.ingestion_service`. It is a daemon and MUST NOT be started under uvicorn.
+R15 (MUST): Take the Redis URL and Supabase credentials from `settings`; `shared/config.py` is the only module that reads the environment.
+</contract_rules>
+
+<pdd>
+**The dedup seam (US-03).** `pm_agent` will eventually classify a survivor as new-unique,
+duplicate, extension, or already-shipped, and only the first two become rows. Step 1 inserts
+directly instead. The seam is R4→R6: today the verdict leads straight to an insert; when US-03
+lands, a classify call sits between them and R6 becomes the new-unique branch. Nothing else here
+changes, which is why the insert is deliberately the last statement of an item's handling rather
+than interleaved with screening.
+
+**No outcome is reported to the author.** A rejected pitch leaves its `pending_pitch:*` record
+untouched, so the tray keeps reading "screening" until the 900s TTL expires and the entry
+disappears. That is the scope decision taken in US-06, and it is why R4 has no notification branch
+and this module writes no Redis key at all. Reversing it later means publishing to
+`REDIS_SCREENING_RESULTS` here and having the backend relay it.
+
+**At-least-once, not exactly-once.** `BRPOP` removes an item before it is processed, so a crash
+between pop and insert loses that pitch permanently; the author sees it vanish when the TTL
+lapses rather than hang forever. A reliable queue (`BLMOVE` onto a processing list, or a stream
+with acknowledgements) is the upgrade path — not worth the complexity for the demo, and R8 keeps
+the cheap half of the guarantee.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+<include optional>orchestrator/screener.py</include>
+<include select="lines:56-84">schema.sql</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__screen_incoming_pitches.md
+R2: docs/user_stories/story__pitch_a_feature.md
+R3: docs/user_stories/story__screen_incoming_pitches.md
+R4: docs/user_stories/story__screen_incoming_pitches.md
+R5: docs/user_stories/story__screen_incoming_pitches.md
+R6: docs/user_stories/story__track_my_pitches.md
+R7: docs/user_stories/story__browse_the_pipeline_board.md
+R8: TODO — add a test asserting a redelivered feature_id does not raise
+R9: docs/user_stories/story__dedup_against_existing_features.md
+R10: TODO — add a test asserting no pitch text reaches a log record
+R11: TODO — add a test asserting one client is built and closed
+R12: TODO — add a test asserting SIGTERM finishes the in-flight item
+R13: TODO — add a test asserting one bad item does not stop the loop
+R14: TODO — add a test asserting main() is importable and synchronous
+R15: TODO — add a test asserting os.environ is never read directly
+</coverage>

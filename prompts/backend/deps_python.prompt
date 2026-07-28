@@ -69,6 +69,7 @@ inside it. That is where the frozen schema puts it and where the frontend countd
 environment or build a second `Settings`.
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include optional>shared/config.py</include>
 <include select="lines:189-206">prompts/shared/openapi.yaml</include>
 </dependencies>

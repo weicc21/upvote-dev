@@ -115,6 +115,7 @@ queue, which reads to the author as the pitch being thrown away.
 </pdd>
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include optional>backend/deps.py</include>
 <include optional>shared/constants.py</include>
 <include select="lines:11-67">prompts/shared/openapi.yaml</include>

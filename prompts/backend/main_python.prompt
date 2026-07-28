@@ -101,6 +101,7 @@ file instead of a registration-order rule enforced here.
 </pdd>
 
 <dependencies>
+<include>prompts/shared/module_map.md</include>
 <include optional>shared/config.py</include>
 <include optional>backend/deps.py</include>
 <include optional>backend/routes/features.py</include>
