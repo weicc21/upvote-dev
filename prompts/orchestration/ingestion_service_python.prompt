@@ -2,7 +2,7 @@
 
 <pdd-interface>
 {"type":"module","module":{"functions":[
-  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate' | 'unavailable'"},
+  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate' | 'unavailable' | 'merged' | 'already_shipped'"},
   {"name":"run","signature":"async def run(stop: asyncio.Event | None = None) -> None","returns":"the BRPOP loop; returns when stop is set"},
   {"name":"main","signature":"def main() -> None","returns":"console-script entrypoint; wraps asyncio.run(run())"}
 ]}}
@@ -11,6 +11,7 @@
 <pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/screener_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/pm_agent_python.prompt</pdd-dependency>
 
 Implement `orchestrator/ingestion_service.py` — a long-running process, not an ASGI app.
 
@@ -30,7 +31,8 @@ This module DOES NOT judge a pitch — `screener.screen_pitch` owns every verdic
 This module DOES NOT serve HTTP or import from `backend/`; Redis is the only channel between the API and this process.
 This module DOES NOT write, update, or delete a `pending_pitch:*` record — the API writes it once and its TTL alone clears it.
 This module DOES NOT notify an author of any outcome; the MVP reports no screening result.
-This module DOES NOT dedup, merge, split, or call an LLM — those are US-03 and later.
+This module DOES NOT judge duplication — `pm_agent.classify` owns that decision; this module only applies it.
+This module DOES NOT split a feature or set an unlock threshold — those are US-08.
 </non_responsibilities>
 
 <vocabulary>
@@ -48,7 +50,8 @@ This module DOES NOT dedup, merge, split, or call an LLM — those are US-03 and
 
 <contract_rules>
 R1 (MUST): Consume with `BRPOP` on the key from `shared.constants.REDIS_FEATURE_INTAKE`, using a bounded timeout so a stop signal is noticed within one timeout rather than blocking forever. On timeout, loop.
-R2 (MUST): Parse each item as JSON carrying exactly the keys the API writes — `feature_id`, `author_id`, `title`, `description`, `submitted_at`. These names are the contract between two processes that never import each other, so renaming one silently strands every pitch.
+R2 (MUST): Expose the expected key set as a module-level `frozenset` constant and require the parsed item's keys to equal it **exactly** — not merely contain it. The five are `feature_id`, `author_id`, `title`, `description`, `submitted_at`. A subset test passes an item carrying unknown extra fields, and neither a subset nor a superset test can be pinned from outside the module, so a producer/consumer contract test has nothing to compare against. These names are the contract between two processes that never import each other: dropping one silently strands every pitch in the queue, which has already happened once.
+
 R3 (MUST): Treat an unparseable or non-object item as `malformed` — log at WARNING with length only, drop it, continue. One bad item MUST NOT stop the daemon, because `BRPOP` is destructive and a crash loop would drain the queue into nothing.
 R4 (MUST): `await screen_pitch(...)` for every well-formed item and act only on its verdict. A rejected pitch is dropped: not inserted, not written back to Redis, not retried.
 R16 (MUST): Treat `ScreeningUnavailable` as its own outcome, `unavailable` — log at ERROR with the `feature_id`, drop the item, continue. It means no verdict was obtained, so inserting would publish unscreened content and is forbidden; but it is an infrastructure failure rather than a rejected pitch, and conflating the two would hide a model outage inside a normal-looking rejection count.
@@ -63,6 +66,15 @@ R12 (MUST): Handle `SIGINT` and `SIGTERM` by setting the stop event and letting 
 R13 (MUST): Keep an unexpected exception on one item from killing the loop — log it with the `feature_id`, drop the item, continue. The daemon's uptime is what the whole pipeline depends on.
 R14 (MUST): Expose `main()` as a sync wrapper over `asyncio.run(run())` with an `if __name__ == "__main__"` guard, so it runs as `python -m orchestrator.ingestion_service`. It is a daemon and MUST NOT be started under uvicorn.
 R15 (MUST): Take the Redis URL and Supabase credentials from `settings`; `shared/config.py` is the only module that reads the environment.
+R17 (MUST): After a passing verdict, `await pm_agent.classify(...)` with the current backlog and shipped sets, and route its four outcomes. This is the seam step 1 reserved: screening decides whether a pitch may be published, dedup decides what publishing it means.
+R18 (MUST): Read the candidate sets from Postgres before classifying — `VOTING` rows as `backlog`, `COMPILED` rows as `shipped` — selecting only `id`, `title`, and `description`. Sending vote counts or status invites the model to reason about popularity, which is not what it is asked (pm_agent R11).
+R19 (MUST): On `new_unique`, insert exactly as before. On `extends_shipped`, insert the same row plus `extends_id` = the target and `extends_title` = the target's title. The denormalised title is what lets a board card render the 'builds on' chip without a second query, and it is the only reason that column exists.
+R20 (MUST): On `duplicate`, insert **no** new row. Instead increment the canonical row's `upvotes` by calling `increment_upvotes` with exactly one argument, `{"row_id": <canonical id>}` — it adds one and takes no `inc`/`amount` parameter, and PostgREST rejects an invented one with `PGRST202` at runtime, increment its `merge_count`, and insert a `feature_votes` row for the pitch's author against the canonical id.
+R21 (MUST): Write that `feature_votes` row on every merge. Without it the merging author is counted in `upvotes` but has no vote row, so `viewer_has_voted` reads false and they can upvote the canonical feature again — one person, two votes. This is the invariant that makes a merged vote indistinguishable from a direct one.
+R22 (MUST): Treat a unique-violation on that vote insert as already-counted — log at INFO and continue, still reporting `merged`. The author had already voted for the canonical row before pitching a duplicate of it, so their demand is recorded exactly once, which is the correct end state.
+R23 (MUST): On `already_shipped`, insert nothing and report `already_shipped`. The feature exists; adding a row would invite the community to vote for work already done.
+R24 (MUST NOT): Let a dedup failure lose a pitch. `classify` falls back to `new_unique` by contract, so an outage produces a possibly-duplicate row rather than silence — and if it ever raises, treat it as `new_unique` here rather than dropping the item.
+R25 (MUST): Report each outcome under its own tag — `inserted`, `merged`, `already_shipped` — never collapsing them into one. A merge and an insert are different things happening to the community's demand signal, and a single counter would hide which the pipeline is actually doing.
 </contract_rules>
 
 <pdd>
@@ -91,6 +103,7 @@ the cheap half of the guarantee.
 <include optional>shared/constants.py</include>
 <include optional>shared/config.py</include>
 <include optional>orchestrator/screener.py</include>
+<include optional>orchestrator/pm_agent.py</include>
 <include select="lines:56-84">schema.sql</include>
 </dependencies>
 
@@ -111,4 +124,13 @@ R13: TODO — add a test asserting one bad item does not stop the loop
 R14: TODO — add a test asserting main() is importable and synchronous
 R15: TODO — add a test asserting os.environ is never read directly
 R16: docs/user_stories/story__screen_incoming_pitches.md
+R17: docs/user_stories/story__dedup_against_existing_features.md
+R18: docs/user_stories/story__dedup_against_existing_features.md
+R19: docs/user_stories/story__dedup_against_existing_features.md
+R20: docs/user_stories/story__dedup_against_existing_features.md
+R21: docs/user_stories/story__upvote_a_feature.md
+R22: docs/user_stories/story__upvote_a_feature.md
+R23: docs/user_stories/story__dedup_against_existing_features.md
+R24: docs/user_stories/story__dedup_against_existing_features.md
+R25: docs/user_stories/story__decision_log.md
 </coverage>

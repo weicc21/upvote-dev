@@ -177,3 +177,33 @@ async def test_r27_names_the_field_that_failed(make_client) -> None:
     r = make_client().post("/api/features", json={"title": GOOD_TITLE, "description": "nope"})
     assert r.status_code == 400
     assert "description" in r.text.lower()
+
+
+# ==========================================================================
+# R28 — the cross-process intake contract
+# ==========================================================================
+
+async def test_r28_intake_envelope_has_exactly_the_five_agreed_keys(make_client, fake_redis) -> None:
+    """The API and the daemon never import each other, so nothing but a test
+    holds this envelope together. Regenerating either side once dropped
+    `submitted_at` and stranded every pitch in the queue as 'malformed'."""
+    r = make_client().post("/api/features", json={"title": GOOD_TITLE, "description": GOOD_DESC})
+    assert r.status_code == 202
+    payload = await _queued_payload(fake_redis, r.json()["feature_id"])
+    assert set(payload) == {"feature_id", "author_id", "title", "description", "submitted_at"}
+
+
+async def test_r28_the_daemon_accepts_what_this_api_produces(make_client, fake_redis) -> None:
+    """Pin both halves of the contract in one assertion, against the real consumer."""
+    from orchestrator import ingestion_service as svc
+
+    r = make_client().post("/api/features", json={"title": GOOD_TITLE, "description": GOOD_DESC})
+    payload = await _queued_payload(fake_redis, r.json()["feature_id"])
+
+    expected = next((getattr(svc, n) for n in ("INTAKE_KEYS", "_EXPECTED_KEYS", "_REQUIRED_KEYS")
+                     if getattr(svc, n, None) is not None), None)
+    assert expected is not None, "the daemon no longer declares its expected key set"
+    assert set(payload) == set(expected), (
+        f"producer/consumer drift: API writes {sorted(payload)}, "
+        f"daemon expects {sorted(expected)}"
+    )

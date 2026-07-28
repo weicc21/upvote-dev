@@ -1,12 +1,8 @@
-"""Long-running intake daemon — drains ``feature_intake`` and persists survivors.
+"""Ingestion daemon — drains ``feature_intake`` and persists survivors.
 
-This module is a standalone process (``python -m orchestrator.ingestion_service``),
-**not** an ASGI app.  It bridges the Redis queue written by ``POST /api/features``
-and the ``feature_requests`` table that the board reads.
+Long-running process, **not** an ASGI app.  Start with::
 
-Every verdict is delegated to :func:`orchestrator.screener.screen_pitch`; this
-module owns only the queue loop, the Postgres insert, and the lifecycle of its
-own clients.
+    python -m orchestrator.ingestion_service
 """
 
 from __future__ import annotations
@@ -23,33 +19,60 @@ from postgrest.exceptions import APIError
 from supabase._async.client import AsyncClient, create_client
 
 from orchestrator.screener import ScreeningUnavailable, screen_pitch
+from orchestrator import pm_agent
+from orchestrator.pm_agent import Classification, FeatureRef, Outcome
 from shared.config import settings
 from shared.constants import (
     REDIS_FEATURE_INTAKE,
     TABLE_FEATURE_REQUESTS,
+    TABLE_FEATURE_VOTES,
     FeatureStatus,
 )
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Internal constants
+# R2: canonical key set — the contract between API producer and this consumer
 # ---------------------------------------------------------------------------
 
-_BRPOP_TIMEOUT_SECONDS: Final[int] = 2
-"""Bounded timeout so the stop-event is checked at least every N seconds (R1)."""
-
-_REQUIRED_KEYS: Final[frozenset[str]] = frozenset(
+INTAKE_KEYS: Final[frozenset[str]] = frozenset(
     {"feature_id", "author_id", "title", "description", "submitted_at"}
 )
-"""Exact keys the API writes — the cross-process contract (R2)."""
 
-# Outcome tags returned by :func:`process_one`.
-_INSERTED: Final[str] = "inserted"
-_REJECTED: Final[str] = "rejected"
-_MALFORMED: Final[str] = "malformed"
-_DUPLICATE: Final[str] = "duplicate"
-_UNAVAILABLE: Final[str] = "unavailable"
+# ---------------------------------------------------------------------------
+# BRPOP timeout — bounded so the stop-event is noticed promptly (R1)
+# ---------------------------------------------------------------------------
+
+_BRPOP_TIMEOUT: Final[int] = 2  # seconds
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_unique_violation(exc: APIError) -> bool:
+    """Return True when a PostgREST error signals a unique-constraint violation."""
+    # PostgREST surfaces Postgres error code 23505 in the response body.
+    msg = str(exc).lower()
+    return "23505" in msg or "duplicate" in msg or "unique" in msg
+
+
+async def _fetch_refs(
+    supabase: AsyncClient,
+    status: FeatureStatus,
+) -> list[FeatureRef]:
+    """Read id/title/description for rows matching *status* (R18)."""
+    resp = (
+        await supabase.table(TABLE_FEATURE_REQUESTS)
+        .select("id, title, description")
+        .eq("status", status.value)
+        .execute()
+    )
+    return [
+        FeatureRef(id=row["id"], title=row["title"], description=row["description"])
+        for row in (resp.data or [])
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -58,96 +81,161 @@ _UNAVAILABLE: Final[str] = "unavailable"
 
 
 async def process_one(raw: str, supabase: AsyncClient) -> str:
-    """Screen a single intake item and persist it if it passes.
+    """Process a single intake item and return an outcome tag.
 
-    Returns one of ``'inserted'``, ``'rejected'``, ``'malformed'``,
-    ``'duplicate'``, or ``'unavailable'``.
+    Outcome tags: ``inserted`` | ``rejected`` | ``malformed`` | ``duplicate``
+    | ``unavailable`` | ``merged`` | ``already_shipped``
     """
 
-    # -- R3: parse --------------------------------------------------------
+    # --- R3: parse --------------------------------------------------------
     try:
-        payload = json.loads(raw)
+        item = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        logger.warning(
-            "malformed intake item (length=%d); dropping",
-            len(raw) if isinstance(raw, str) else 0,
-        )
-        return _MALFORMED
+        logger.warning("malformed intake item (length=%d)", len(raw) if raw else 0)
+        return "malformed"
 
-    if not isinstance(payload, dict):
-        logger.warning(
-            "malformed intake item (length=%d); dropping",
-            len(raw),
-        )
-        return _MALFORMED
+    if not isinstance(item, dict):
+        logger.warning("malformed intake item (length=%d)", len(raw))
+        return "malformed"
 
-    # -- R2: exact key check ----------------------------------------------
-    if set(payload.keys()) != _REQUIRED_KEYS:
-        logger.warning(
-            "malformed intake item (length=%d); dropping",
-            len(raw),
-        )
-        return _MALFORMED
+    # --- R2: exact key match ----------------------------------------------
+    if set(item.keys()) != INTAKE_KEYS:
+        logger.warning("malformed intake item (length=%d)", len(raw))
+        return "malformed"
 
-    feature_id: str = payload.get("feature_id", "")
+    feature_id: str = item["feature_id"]
 
-    # -- R4: delegate verdict to screener ---------------------------------
-    # -- R16: ScreeningUnavailable → unavailable outcome ------------------
+    # --- R4 / R16: screen -------------------------------------------------
     try:
-        verdict = await screen_pitch(payload)
+        verdict = await screen_pitch(item)
     except ScreeningUnavailable:
-        logger.error(
-            "feature_id=%s outcome=%s",
-            feature_id,
-            _UNAVAILABLE,
-        )
-        return _UNAVAILABLE
+        logger.error("screening unavailable for feature_id=%s", feature_id)
+        return "unavailable"
 
     if not verdict.passed:
-        # R5: never log title or description of a rejected pitch.
-        logger.info(
-            "feature_id=%s outcome=%s",
-            feature_id,
-            _REJECTED,
-        )
-        return _REJECTED
+        # R5: no title/description in logs for rejected pitches
+        logger.info("feature_id=%s outcome=rejected", feature_id)
+        return "rejected"
 
-    # -- R6, R7: insert survivor ------------------------------------------
+    # --- R17–R24: dedup classification ------------------------------------
+    backlog = await _fetch_refs(supabase, FeatureStatus.VOTING)
+    shipped = await _fetch_refs(supabase, FeatureStatus.COMPILED)
+
     try:
-        await (
-            supabase.table(TABLE_FEATURE_REQUESTS)
-            .insert(
-                {
-                    "id": payload["feature_id"],
-                    "author_id": payload["author_id"],
-                    "title": payload["title"],
-                    "description": payload["description"],
-                    "status": FeatureStatus.VOTING,  # R7
-                    "upvotes": 1,
-                },
-            )
-            .execute()
+        classification: Classification = await pm_agent.classify(
+            item,
+            backlog=backlog,
+            shipped=shipped,
         )
-    except APIError as exc:
-        # R8: unique-violation → duplicate, not a crash.
-        # Postgres error code 23505 is unique_violation.
-        msg = str(exc)
-        if "23505" in msg or "duplicate" in msg.lower():
-            logger.info(
-                "feature_id=%s outcome=%s",
-                feature_id,
-                _DUPLICATE,
-            )
-            return _DUPLICATE
-        raise  # unexpected DB error — let the outer handler deal with it
+    except Exception:  # noqa: BLE001 — R24: never lose a pitch
+        classification = Classification(
+            feature_id=feature_id,
+            outcome=Outcome.new_unique,
+            target_id=None,
+            target_title=None,
+            detail="fallback: classify raised unexpectedly",
+        )
 
-    # R10: log outcome without pitch text.
-    logger.info(
-        "feature_id=%s outcome=%s",
-        feature_id,
-        _INSERTED,
-    )
-    return _INSERTED
+    # --- Route on outcome -------------------------------------------------
+
+    if classification.outcome == Outcome.already_shipped:
+        # R23: insert nothing
+        logger.info("feature_id=%s outcome=already_shipped", feature_id)
+        return "already_shipped"
+
+    if classification.outcome == Outcome.duplicate:
+        # R20: increment canonical row's upvotes, merge_count, add vote row
+        canonical_id: str = classification.target_id  # type: ignore[assignment]
+        try:
+            await supabase.rpc(
+                "increment_upvotes", {"row_id": canonical_id}
+            ).execute()
+        except APIError as exc:
+            if not _is_unique_violation(exc):
+                raise
+
+        # Increment merge_count on canonical row
+        try:
+            # Read current merge_count, then update
+            current_resp = (
+                await supabase.table(TABLE_FEATURE_REQUESTS)
+                .select("merge_count")
+                .eq("id", canonical_id)
+                .execute()
+            )
+            current_mc = 0
+            if current_resp.data and current_resp.data[0].get("merge_count") is not None:
+                current_mc = current_resp.data[0]["merge_count"]
+            await (
+                supabase.table(TABLE_FEATURE_REQUESTS)
+                .update({"merge_count": current_mc + 1})
+                .eq("id", canonical_id)
+                .execute()
+            )
+        except APIError:
+            # Best-effort; the upvote is the critical part
+            logger.warning(
+                "feature_id=%s merge_count increment failed for canonical=%s",
+                feature_id,
+                canonical_id,
+            )
+
+        # R21 / R22: insert vote row for the merging author
+        try:
+            await (
+                supabase.table(TABLE_FEATURE_VOTES)
+                .insert(
+                    {
+                        "feature_id": canonical_id,
+                        "user_id": item["author_id"],
+                    }
+                )
+                .execute()
+            )
+        except APIError as exc:
+            if _is_unique_violation(exc):
+                # R22: already voted — fine
+                logger.info(
+                    "feature_id=%s merged author already voted on canonical=%s",
+                    feature_id,
+                    canonical_id,
+                )
+            else:
+                raise
+
+        logger.info("feature_id=%s outcome=merged canonical=%s", feature_id, canonical_id)
+        return "merged"
+
+    # --- new_unique or extends_shipped: insert a new row ------------------
+
+    row: dict[str, object] = {
+        "id": feature_id,
+        "title": item["title"],
+        "description": item["description"],
+        "author_id": item["author_id"],
+        "status": FeatureStatus.VOTING.value,  # R7
+        "upvotes": 1,
+    }
+
+    # R19: extends_shipped gets extra columns
+    if classification.outcome == Outcome.extends_shipped and classification.target_id:
+        row["extends_id"] = classification.target_id
+        row["extends_title"] = classification.target_title
+
+    # R9: never set merge_count, parent_id, split_depth, unlock_threshold
+
+    try:
+        await supabase.table(TABLE_FEATURE_REQUESTS).insert(row).execute()
+    except APIError as exc:
+        if _is_unique_violation(exc):
+            # R8: redelivered id — idempotent
+            logger.info("feature_id=%s outcome=duplicate", feature_id)
+            return "duplicate"
+        raise
+
+    # R10 / R25
+    logger.info("feature_id=%s outcome=inserted", feature_id)
+    return "inserted"
 
 
 # ---------------------------------------------------------------------------
@@ -158,97 +246,90 @@ async def process_one(raw: str, supabase: AsyncClient) -> str:
 async def run(stop: asyncio.Event | None = None) -> None:
     """Consume ``feature_intake`` until *stop* is set.
 
-    Builds its own Supabase and Redis clients (R11, R15) and tears them
-    down on exit.
+    Builds Supabase and Redis clients once (R11, R15) and tears them down
+    on exit.
     """
-
     if stop is None:
         stop = asyncio.Event()
 
-    # -- R12: wire SIGINT / SIGTERM to the stop event ---------------------
+    # --- R12: graceful shutdown on SIGINT / SIGTERM -----------------------
     loop = asyncio.get_running_loop()
 
-    def _request_stop(sig: signal.Signals) -> None:  # noqa: ARG001
+    def _signal_handler() -> None:
         logger.info("shutdown signal received — finishing in-flight item")
         stop.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _request_stop, sig)
+            loop.add_signal_handler(sig, _signal_handler)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler; fall back to
-            # signal.signal which is less clean but still functional.
-            signal.signal(sig, lambda _s, _f: _request_stop(_s))
+            # Windows doesn't support add_signal_handler
+            pass
 
-    # -- R11, R15: build clients once -------------------------------------
-    redis: aioredis.Redis = aioredis.from_url(
-        settings.REDIS_URL,
-        decode_responses=True,
-    )
+    # --- R11 / R15: build clients once ------------------------------------
     supabase: AsyncClient = await create_client(
         settings.SUPABASE_URL,
         settings.SUPABASE_SERVICE_KEY.get_secret_value(),
     )
-
-    logger.info("ingestion_service started — consuming %s", REDIS_FEATURE_INTAKE)
+    redis_client: aioredis.Redis = aioredis.from_url(
+        settings.REDIS_URL, decode_responses=True
+    )
 
     try:
+        logger.info("ingestion_service started — consuming %s", REDIS_FEATURE_INTAKE)
+
         while not stop.is_set():
-            # -- R1: bounded BRPOP ----------------------------------------
+            # R1: bounded BRPOP
             try:
-                result = await redis.brpop(
-                    REDIS_FEATURE_INTAKE,
-                    timeout=_BRPOP_TIMEOUT_SECONDS,
+                result = await redis_client.brpop(
+                    REDIS_FEATURE_INTAKE, timeout=_BRPOP_TIMEOUT
                 )
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("redis BRPOP error — retrying after timeout")
-                await asyncio.sleep(_BRPOP_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                # Redis hiccup — wait briefly and retry
+                if not stop.is_set():
+                    await asyncio.sleep(1)
                 continue
 
             if result is None:
-                # Timeout — no item available; loop to re-check stop.
+                # Timeout — loop back to check stop
                 continue
 
-            # result is (key, value)
             _key, raw = result
 
-            # -- R13: isolate per-item failures ---------------------------
+            # --- R13: one bad item must not kill the loop -----------------
             try:
                 await process_one(raw, supabase)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                # Extract feature_id best-effort for the log line.
+            except Exception:  # noqa: BLE001
+                # Try to extract feature_id for the log line
+                fid = "unknown"
                 try:
-                    fid = json.loads(raw).get("feature_id", "<unknown>")
-                except Exception:
-                    fid = "<unknown>"
-                logger.exception(
-                    "feature_id=%s unexpected error — dropping item",
-                    fid,
-                )
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        fid = parsed.get("feature_id", "unknown")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.exception("unexpected error processing feature_id=%s", fid)
+
     finally:
-        # -- R11: close clients -------------------------------------------
-        logger.info("ingestion_service shutting down")
-        await redis.aclose()
-        # supabase-py AsyncClient doesn't expose a close(); the httpx
-        # transport is cleaned up by GC.  If a future version adds one,
-        # call it here.
+        # R11: close both clients
+        await redis_client.aclose()
+        # supabase-py AsyncClient doesn't expose a close; aclose if available
+        if hasattr(supabase, "aclose"):
+            await supabase.aclose()  # type: ignore[attr-defined]
+
+    logger.info("ingestion_service stopped")
 
 
 # ---------------------------------------------------------------------------
-# main — console-script entrypoint (R14)
+# main — sync entrypoint (R14)
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    """Synchronous wrapper suitable for ``console_scripts`` or direct invocation."""
+    """Console-script entrypoint — wraps ``asyncio.run(run())``."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
     )
     asyncio.run(run())
 

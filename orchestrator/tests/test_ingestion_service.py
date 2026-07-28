@@ -40,28 +40,82 @@ def item(**over: Any) -> str:
     return json.dumps(base)
 
 
-class FakeInsert:
-    def __init__(self, store: FakeSupabase, table: str) -> None:
-        self._store, self._table = store, table
+class FakeQuery:
+    """Records the builder chain; replays canned rows or an injected error."""
 
-    def insert(self, row: dict[str, Any]) -> FakeInsert:
-        self._row = row
+    def __init__(self, store: "FakeSupabase", table: str) -> None:
+        self._store, self._table = store, table
+        self._op: str | None = None
+        self._row: Any = None
+
+    def insert(self, row: dict[str, Any]) -> "FakeQuery":
+        self._op, self._row = "insert", row
+        return self
+
+    def select(self, *a: Any, **k: Any) -> "FakeQuery":
+        self._op = "select"
+        return self
+
+    def update(self, row: dict[str, Any], **k: Any) -> "FakeQuery":
+        self._op, self._row = "update", row
+        return self
+
+    def eq(self, *a: Any, **k: Any) -> "FakeQuery":
+        return self
+
+    def in_(self, *a: Any, **k: Any) -> "FakeQuery":
+        return self
+
+    def limit(self, *a: Any, **k: Any) -> "FakeQuery":
+        return self
+
+    def order(self, *a: Any, **k: Any) -> "FakeQuery":
+        return self
+
+    def maybe_single(self) -> "FakeQuery":
+        self._single = True
+        return self
+
+    def single(self) -> "FakeQuery":
+        self._single = True
         return self
 
     async def execute(self) -> Any:
-        self._store.inserts.append({"table": self._table, "row": self._row})
-        if self._store.raise_on_insert is not None:
-            raise self._store.raise_on_insert
-        return type("Resp", (), {"data": [self._row]})()
+        if self._op == "insert":
+            self._store.inserts.append({"table": self._table, "row": self._row})
+            if self._store.raise_on_insert is not None:
+                raise self._store.raise_on_insert
+            return type("Resp", (), {"data": [self._row]})()
+        if self._op == "update":
+            self._store.updates.append({"table": self._table, "row": self._row})
+            return type("Resp", (), {"data": [self._row]})()
+        rows = self._store.rows.get(self._table, [])
+        if getattr(self, "_single", False):
+            return type("Resp", (), {"data": rows[0] if rows else None})()
+        return type("Resp", (), {"data": list(rows)})()
 
 
 class FakeSupabase:
     def __init__(self) -> None:
         self.inserts: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
+        self.rows: dict[str, list[dict[str, Any]]] = {}
         self.raise_on_insert: Exception | None = None
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        self.rpc_result: Any = None
 
-    def table(self, name: str) -> FakeInsert:
-        return FakeInsert(self, name)
+    def table(self, name: str) -> FakeQuery:
+        return FakeQuery(self, name)
+
+    def rpc(self, fn: str, params: dict[str, Any] | None = None) -> Any:
+        self.rpc_calls.append((fn, params or {}))
+        store = self
+
+        class _Rpc:
+            async def execute(self_inner) -> Any:
+                return type("Resp", (), {"data": store.rpc_result})()
+
+        return _Rpc()
 
 
 @pytest.fixture
@@ -328,3 +382,116 @@ async def test_daemon_awaits_the_screener(sb: FakeSupabase) -> None:
     import inspect as _i
     from orchestrator import screener as real
     assert _i.iscoroutinefunction(real.screen_pitch)
+
+
+# ==========================================================================
+# R17-R25 — dedup routing (US-03)
+# ==========================================================================
+
+from orchestrator.pm_agent import Classification, Outcome  # noqa: E402
+
+CANON = "abcdabcd-abcd-4bcd-8bcd-abcdabcdabcd"
+BASE = "99999999-9999-4999-8999-999999999999"
+
+
+def _classify_as(outcome: Outcome, target_id=None, target_title=None):
+    async def _c(pitch, **kw):
+        return Classification(feature_id=pitch.get("feature_id", ""), outcome=outcome,
+                              target_id=target_id, target_title=target_title, detail="test")
+    return _c
+
+
+async def test_r19_new_unique_inserts_without_extends_columns(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.new_unique))
+    assert await svc.process_one(item(), sb) == "inserted"
+    row = sb.inserts[0]["row"]
+    assert "extends_id" not in row and "extends_title" not in row
+
+
+async def test_r19_extends_shipped_sets_both_extends_columns(sb: FakeSupabase, monkeypatch) -> None:
+    """extends_title is denormalised so a card renders 'builds on' with no second query."""
+    monkeypatch.setattr(svc.pm_agent, "classify",
+                        _classify_as(Outcome.extends_shipped, BASE, "Login with email"))
+    assert await svc.process_one(item(), sb) == "inserted"
+    row = sb.inserts[0]["row"]
+    assert row["extends_id"] == BASE
+    assert row["extends_title"] == "Login with email"
+
+
+async def test_r20_duplicate_inserts_no_feature_row(sb: FakeSupabase, monkeypatch) -> None:
+    """A merge concentrates demand; a second row would scatter it again."""
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    assert await svc.process_one(item(), sb) == "merged"
+    feature_inserts = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS]
+    assert feature_inserts == [], "a duplicate must not create a board row"
+
+
+async def test_r20_duplicate_increments_the_canonical_row_atomically(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    await svc.process_one(item(), sb)
+    assert any(fn == "increment_upvotes" for fn, _ in sb.rpc_calls), \
+        "the merge must use the atomic RPC, not a read-then-write"
+
+
+async def test_r21_merge_writes_a_vote_row_for_the_author(sb: FakeSupabase, monkeypatch) -> None:
+    """Without this the merging author is in `upvotes` but has no vote row,
+    so viewer_has_voted reads false and they can vote again — one person, two votes."""
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    await svc.process_one(item(), sb)
+    votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
+    assert votes, "no feature_votes row written for the merged author"
+    assert votes[0]["row"]["feature_id"] == CANON, "the vote must land on the canonical row"
+    assert votes[0]["row"]["user_id"] == AUTHOR
+
+
+async def test_r23_already_shipped_writes_nothing(sb: FakeSupabase, monkeypatch) -> None:
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.already_shipped, BASE, "Login with email"))
+    assert await svc.process_one(item(), sb) == "already_shipped"
+    assert sb.inserts == [] and sb.rpc_calls == []
+
+
+async def test_r24_a_raising_classifier_still_publishes(sb: FakeSupabase, monkeypatch) -> None:
+    """Dedup fails open — an outage must not lose a screened pitch."""
+    async def _boom(pitch, **kw):
+        raise RuntimeError("classifier exploded")
+    monkeypatch.setattr(svc.pm_agent, "classify", _boom)
+    assert await svc.process_one(item(), sb) == "inserted"
+
+
+async def test_r25_outcomes_are_reported_distinctly(sb: FakeSupabase, monkeypatch) -> None:
+    """A merge and an insert are different things happening to the demand signal."""
+    seen = set()
+    for outcome, target, title in [
+        (Outcome.new_unique, None, None),
+        (Outcome.duplicate, CANON, "Dark mode"),
+        (Outcome.already_shipped, BASE, "Login"),
+    ]:
+        fresh = FakeSupabase()
+        monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(outcome, target, title))
+        seen.add(await svc.process_one(item(), fresh))
+    assert seen == {"inserted", "merged", "already_shipped"}
+
+
+async def test_r18_candidate_sets_are_read_before_classifying(sb: FakeSupabase, monkeypatch) -> None:
+    captured: dict = {}
+
+    async def _spy(pitch, *, backlog, shipped, **kw):
+        captured["backlog"], captured["shipped"] = backlog, shipped
+        return Classification(feature_id=pitch["feature_id"], outcome=Outcome.new_unique,
+                              target_id=None, target_title=None, detail="t")
+
+    monkeypatch.setattr(svc.pm_agent, "classify", _spy)
+    await svc.process_one(item(), sb)
+    assert "backlog" in captured, "classify was called without candidate sets"
+
+
+async def test_r20_rpc_is_called_with_exactly_row_id(sb: FakeSupabase, monkeypatch) -> None:
+    """PostgREST matches on the exact named-argument set. An invented `inc`
+    parameter fails at runtime with PGRST202, which is how the merge silently
+    stopped transferring votes while still reporting success."""
+    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    await svc.process_one(item(), sb)
+    calls = [c for c in sb.rpc_calls if c[0] == "increment_upvotes"]
+    assert calls, "increment_upvotes was never called"
+    assert set(calls[0][1]) == {"row_id"}, f"wrong argument set: {sorted(calls[0][1])}"
+    assert calls[0][1]["row_id"] == CANON

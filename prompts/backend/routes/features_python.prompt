@@ -102,6 +102,7 @@ R24 (MUST): Apply the length bounds to the **cleaned** text, not the raw body. A
 R25 (MUST): Enqueue and store exactly the cleaned text. The string that passed validation is the one written to the pending record and to the intake payload, so the author's tray, the screener, and the board can never show three different versions of one pitch.
 R26 (MUST): Run R22–R24 **before** the Pitch Coin is checked or spent. A submission the server refused outright never got a screening attempt, so charging for it would burn an author's daily allowance on a typo.
 R27 (MUST NOT): Echo the offending text back in the validation message. Name the field and the rule that failed — the copy is displayed verbatim to the author (`openapi.yaml` ErrorBody), and reflecting unscreened input into a response is how a rejected payload reaches a browser.
+R28 (MUST): Write the intake envelope with exactly these five keys — `feature_id`, `author_id`, `title`, `description`, `submitted_at` — and no others. This is a contract between two processes that never import each other: the orchestrator validates the key set exactly and drops anything else as malformed, so adding or removing one here strands every pitch in the queue with no error visible from this side.
 </contract_rules>
 
 <pdd>
@@ -161,4 +162,5 @@ R24: story__pitch_a_feature.md
 R25: story__track_my_pitches.md
 R26: story__pitch_a_feature.md
 R27: TODO — add a test asserting the rejected text is not echoed in the error body
+R28: docs/user_stories/story__screen_incoming_pitches.md
 </coverage>
