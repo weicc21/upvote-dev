@@ -162,13 +162,25 @@ def test_r2_uses_full_names_not_shorthand() -> None:
 # R3 — tunables are DEFAULT_-prefixed
 # --------------------------------------------------------------------------
 
-def test_r3_defaults_are_positive_ints() -> None:
+def test_r3_every_tunable_is_default_prefixed_and_sane() -> None:
+    """R3/R10: numeric tunables are positive; the model id is a non-empty string."""
     names = [n for n in dir(C) if n.startswith("DEFAULT_")]
     assert names, "no DEFAULT_* tunables found"
     for n in names:
         v = getattr(C, n)
-        assert isinstance(v, int) and not isinstance(v, bool), n
-        assert v > 0, n
+        assert not isinstance(v, bool), n
+        if isinstance(v, str):
+            assert v.strip(), f"{n} is an empty string"
+        else:
+            assert isinstance(v, (int, float)), n
+            assert v > 0, n
+
+
+def test_r10_llm_defaults_exist_and_are_in_range() -> None:
+    assert isinstance(C.DEFAULT_LLM_MODEL_SCREENING, str)
+    assert 0.0 <= C.DEFAULT_LLM_TEMPERATURE <= 2.0
+    assert C.DEFAULT_LLM_TIMEOUT_SECONDS > 0
+    assert C.DEFAULT_LLM_MAX_ATTEMPTS >= 1, "a zero attempt cap would skip screening entirely"
 
 
 def test_r3_ttl_is_fifteen_minutes() -> None:

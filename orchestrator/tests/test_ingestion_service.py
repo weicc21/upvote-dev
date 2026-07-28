@@ -17,7 +17,8 @@ import pytest
 from postgrest.exceptions import APIError
 
 from orchestrator import ingestion_service as svc
-from shared.constants import TABLE_FEATURE_REQUESTS, FeatureStatus
+from orchestrator.screener import ScreeningUnavailable, Verdict
+from shared.constants import TABLE_FEATURE_REQUESTS, FeatureStatus, RejectionReason
 
 MODULE_SRC = pathlib.Path(svc.__file__)
 FID = "33333333-3333-4333-8333-333333333333"
@@ -134,19 +135,19 @@ async def test_r2_key_names_are_the_cross_process_contract(sb: FakeSupabase) -> 
 # R4 / R5 — rejection
 # ==========================================================================
 
-async def test_r4_rejected_pitch_is_not_inserted(sb: FakeSupabase) -> None:
-    assert await svc.process_one(item(description="too short"), sb) == "rejected"
-    assert sb.inserts == []
-
-
 async def test_r5_rejected_pitch_text_never_reaches_the_log(
-    sb: FakeSupabase, caplog: pytest.LogCaptureFixture
+    sb: FakeSupabase, caplog: pytest.LogCaptureFixture, monkeypatch
 ) -> None:
     """Unscreened content must not land in any durable store, logs included."""
+    async def _reject(pitch, **kw):
+        return Verdict(feature_id=pitch.get("feature_id", ""), passed=False,
+                       reason=RejectionReason.SECURITY, detail="policy violation")
+    monkeypatch.setattr(svc, "screen_pitch", _reject)
+
     with caplog.at_level(logging.DEBUG):
-        await svc.process_one(item(title=SECRET_TITLE, description="short"), sb)
+        await svc.process_one(item(title=SECRET_TITLE, description=SECRET_DESC), sb)
     blob = "\n".join(r.getMessage() for r in caplog.records)
-    assert SECRET_TITLE not in blob
+    assert SECRET_TITLE not in blob and SECRET_DESC not in blob
 
 
 async def test_r10_accepted_pitch_text_also_stays_out_of_the_log(
@@ -278,3 +279,52 @@ async def test_run_returns_promptly_when_stop_is_already_set(monkeypatch) -> Non
     stop = asyncio.Event()
     stop.set()
     await asyncio.wait_for(svc.run(stop), timeout=5)
+
+
+# ==========================================================================
+# R4 / R16 — the screener is async now, and outages are their own outcome
+# ==========================================================================
+
+@pytest.fixture(autouse=True)
+def _pass_screening(monkeypatch):
+    """Default: screening passes, so the existing insert tests still describe the insert."""
+    async def _ok(pitch, **kw):
+        return Verdict(feature_id=pitch.get("feature_id", ""), passed=True, reason=None, detail="ok")
+    monkeypatch.setattr(svc, "screen_pitch", _ok)
+
+
+async def test_r16_screening_unavailable_is_its_own_outcome(sb: FakeSupabase, monkeypatch) -> None:
+    """An outage must not look like a rejection, and must never insert."""
+    async def _boom(pitch, **kw):
+        raise ScreeningUnavailable("model unreachable")
+    monkeypatch.setattr(svc, "screen_pitch", _boom)
+
+    assert await svc.process_one(item(), sb) == "unavailable"
+    assert sb.inserts == [], "unscreened content must never be published"
+
+
+async def test_r16_unavailable_is_logged_at_error(sb: FakeSupabase, monkeypatch, caplog) -> None:
+    async def _boom(pitch, **kw):
+        raise ScreeningUnavailable("model unreachable")
+    monkeypatch.setattr(svc, "screen_pitch", _boom)
+
+    with caplog.at_level(logging.DEBUG):
+        await svc.process_one(item(), sb)
+    assert any(r.levelno >= logging.ERROR for r in caplog.records), "an outage should be ERROR, not INFO"
+
+
+async def test_r4_rejected_verdict_still_drops_without_inserting(sb: FakeSupabase, monkeypatch) -> None:
+    async def _reject(pitch, **kw):
+        return Verdict(feature_id=pitch.get("feature_id", ""), passed=False,
+                       reason=RejectionReason.OFF_TOPIC, detail="not a product idea")
+    monkeypatch.setattr(svc, "screen_pitch", _reject)
+
+    assert await svc.process_one(item(), sb) == "rejected"
+    assert sb.inserts == []
+
+
+async def test_daemon_awaits_the_screener(sb: FakeSupabase) -> None:
+    """screen_pitch is a coroutine function in step 2; a missing await would insert a coroutine."""
+    import inspect as _i
+    from orchestrator import screener as real
+    assert _i.iscoroutinefunction(real.screen_pitch)

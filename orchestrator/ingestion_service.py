@@ -22,7 +22,7 @@ import redis.asyncio as aioredis
 from postgrest.exceptions import APIError
 from supabase._async.client import AsyncClient, create_client
 
-from orchestrator.screener import screen_pitch
+from orchestrator.screener import ScreeningUnavailable, screen_pitch
 from shared.config import settings
 from shared.constants import (
     REDIS_FEATURE_INTAKE,
@@ -49,6 +49,7 @@ _INSERTED: Final[str] = "inserted"
 _REJECTED: Final[str] = "rejected"
 _MALFORMED: Final[str] = "malformed"
 _DUPLICATE: Final[str] = "duplicate"
+_UNAVAILABLE: Final[str] = "unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,8 @@ _DUPLICATE: Final[str] = "duplicate"
 async def process_one(raw: str, supabase: AsyncClient) -> str:
     """Screen a single intake item and persist it if it passes.
 
-    Returns one of ``'inserted'``, ``'rejected'``, ``'malformed'``, or
-    ``'duplicate'``.
+    Returns one of ``'inserted'``, ``'rejected'``, ``'malformed'``,
+    ``'duplicate'``, or ``'unavailable'``.
     """
 
     # -- R3: parse --------------------------------------------------------
@@ -91,7 +92,16 @@ async def process_one(raw: str, supabase: AsyncClient) -> str:
     feature_id: str = payload.get("feature_id", "")
 
     # -- R4: delegate verdict to screener ---------------------------------
-    verdict = screen_pitch(payload)
+    # -- R16: ScreeningUnavailable → unavailable outcome ------------------
+    try:
+        verdict = await screen_pitch(payload)
+    except ScreeningUnavailable:
+        logger.error(
+            "feature_id=%s outcome=%s",
+            feature_id,
+            _UNAVAILABLE,
+        )
+        return _UNAVAILABLE
 
     if not verdict.passed:
         # R5: never log title or description of a rejected pitch.

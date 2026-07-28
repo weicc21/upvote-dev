@@ -2,7 +2,7 @@
 
 <pdd-interface>
 {"type":"module","module":{"functions":[
-  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate'"},
+  {"name":"process_one","signature":"async def process_one(raw: str, supabase: AsyncClient) -> str","returns":"outcome tag: 'inserted' | 'rejected' | 'malformed' | 'duplicate' | 'unavailable'"},
   {"name":"run","signature":"async def run(stop: asyncio.Event | None = None) -> None","returns":"the BRPOP loop; returns when stop is set"},
   {"name":"main","signature":"def main() -> None","returns":"console-script entrypoint; wraps asyncio.run(run())"}
 ]}}
@@ -50,7 +50,8 @@ This module DOES NOT dedup, merge, split, or call an LLM — those are US-03 and
 R1 (MUST): Consume with `BRPOP` on the key from `shared.constants.REDIS_FEATURE_INTAKE`, using a bounded timeout so a stop signal is noticed within one timeout rather than blocking forever. On timeout, loop.
 R2 (MUST): Parse each item as JSON carrying exactly the keys the API writes — `feature_id`, `author_id`, `title`, `description`, `submitted_at`. These names are the contract between two processes that never import each other, so renaming one silently strands every pitch.
 R3 (MUST): Treat an unparseable or non-object item as `malformed` — log at WARNING with length only, drop it, continue. One bad item MUST NOT stop the daemon, because `BRPOP` is destructive and a crash loop would drain the queue into nothing.
-R4 (MUST): Call `screen_pitch` for every well-formed item and act only on its verdict. A rejected pitch is dropped: not inserted, not written back to Redis, not retried.
+R4 (MUST): `await screen_pitch(...)` for every well-formed item and act only on its verdict. A rejected pitch is dropped: not inserted, not written back to Redis, not retried.
+R16 (MUST): Treat `ScreeningUnavailable` as its own outcome, `unavailable` — log at ERROR with the `feature_id`, drop the item, continue. It means no verdict was obtained, so inserting would publish unscreened content and is forbidden; but it is an infrastructure failure rather than a rejected pitch, and conflating the two would hide a model outage inside a normal-looking rejection count.
 R5 (MUST NOT): Persist a rejected pitch's title or description anywhere, logs included. Unscreened content lives only in Redis under the API's TTL, and that invariant is what keeps it off the public board (US-02).
 R6 (MUST): Insert a survivor into `feature_requests` using the payload's own `feature_id` as the primary key, its `author_id`, status `VOTING`, and `upvotes` 1. Reusing the id is what lets the author's tray match the new row to their pending entry (US-06); a fresh uuid would orphan it.
 R7 (MUST): Take the status from `FeatureStatus.VOTING`, never the literal string. The enum is a physical contract with the Postgres type and the only guard against a casing drift that matches zero rows.
@@ -109,4 +110,5 @@ R12: TODO — add a test asserting SIGTERM finishes the in-flight item
 R13: TODO — add a test asserting one bad item does not stop the loop
 R14: TODO — add a test asserting main() is importable and synchronous
 R15: TODO — add a test asserting os.environ is never read directly
+R16: docs/user_stories/story__screen_incoming_pitches.md
 </coverage>

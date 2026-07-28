@@ -18,7 +18,12 @@ so that the public board holds real product ideas rather than spam, abuse, or no
 - Rejected pitch content is never persisted to the main database; it is held briefly for the author only, then expires.
 - The author can see that their pitch was rejected and the reason category.
 - Screening runs continuously as a daemon, not on a human's schedule.
+- If the screening model is unavailable or returns something unusable, the pitch is **not** published. Screening fails closed: no verdict means no public row, never a default pass.
 
 ## Notes
 
 Backs the ingestion worker + `security_relevance_gatekeeper` template. "Fast filter before anything becomes public" in the transcript.
+
+The judgement is made by an LLM behind an OpenAI-compatible endpoint. Which provider and model is
+deployment configuration (`LLM_BASE_URL`, `LLM_MODEL_SCREENING`), not part of this story — the
+behaviour above must hold whichever model is pinned.

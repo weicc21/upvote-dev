@@ -18,6 +18,7 @@ so that my idea enters the public queue instead of dying in a chat thread.
 - Submission requires no account setup ceremony — an identified user is enough.
 - A per-author daily pitch limit (Pitch Coins) prevents flooding; exceeding it returns a clear "out of coins" response, not a silent drop.
 - The author sees a pending state for their pitch while screening runs.
+- Obviously malformed input is refused at submission, before any AI is involved: text outside the length bounds, invisible control characters, and embedded HTML or script markup. The author gets a clear message and keeps their Pitch Coin — a rejected submission never used a screening attempt.
 
 ## Notes
 

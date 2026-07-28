@@ -42,9 +42,13 @@ This module DOES NOT call an LLM, ever.
 ## POST /api/features (US-01)
 
 Body `{title, description}`; `title` 1–60 chars, `description` 30–300 (`openapi.yaml`).
+
+This endpoint is the deterministic gate. Everything it can decide without a model — shape, length,
+invisible characters, embedded markup — it decides here, so the screener only ever spends a model
+call on text that is already well-formed.
 Requires an identified caller via `get_current_user_id`.
 
-Governed by R1–R13 in the contract rules below.
+Governed by R1–R13 and R22–R27 in the contract rules below.
 
 ## GET /api/features (US-05) and GET /api/features/{feature_id}
 
@@ -92,6 +96,12 @@ R18 (MUST): Read the Postgres side filtered by `author_id`, and return each row'
 R19 (MUST NOT): Delete, rewrite, or extend a pending record here. This route is read-only over Redis: the TTL set at pitch time is the sole mechanism that clears a pending entry, whether the pitch passed, was rejected, or was merged.
 R20 (MUST): Declare this route **before** `GET /api/features/{feature_id}` in the module. FastAPI matches in declaration order, so a `{feature_id}` route declared first swallows the literal `mine` and answers `404` for a valid request. Both routes living in this one module is what keeps that ordering a visible, local property.
 R21 (MUST NOT): Accept an author id from the query string, body, or a header. The caller can only ever read their own pitches, and the id comes from `get_current_user_id` alone.
+R22 (MUST): Strip Unicode control characters from `title` and `description` before any other check — category `Cc`/`Cf`, plus zero-width and bidirectional-override codepoints. Keep `\n` and `\t` in `description` only; `title` is single-line, so strip those there too. They are invisible, usually arrive by paste, and would otherwise reach the queue, the model, and the board, where they can hide text or break rendering.
+R23 (MUST): Reject — never sanitise — a `title` or `description` containing raw HTML or script markup, with `400` and `error.code` `validation_failed`. Stripping tags silently changes what the author wrote and can still leave a working payload; refusing tells them what to fix. Detect a tag-like construct (`<tag …>`, `</tag>`, `<script`, and HTML entity escapes for the same), not merely a bare `<` or `>`, so comparisons like `width < 300px` still pass.
+R24 (MUST): Apply the length bounds to the **cleaned** text, not the raw body. A description padded to 30 characters with zero-width spaces is not 30 characters of content, and validating the raw string would let it through.
+R25 (MUST): Enqueue and store exactly the cleaned text. The string that passed validation is the one written to the pending record and to the intake payload, so the author's tray, the screener, and the board can never show three different versions of one pitch.
+R26 (MUST): Run R22–R24 **before** the Pitch Coin is checked or spent. A submission the server refused outright never got a screening attempt, so charging for it would burn an author's daily allowance on a typo.
+R27 (MUST NOT): Echo the offending text back in the validation message. Name the field and the rule that failed — the copy is displayed verbatim to the author (`openapi.yaml` ErrorBody), and reflecting unscreened input into a response is how a rejected payload reaches a browser.
 </contract_rules>
 
 <pdd>
@@ -145,4 +155,10 @@ R18: story__track_my_pitches.md
 R19: story__track_my_pitches.md
 R20: TODO — add a test asserting GET /api/features/mine is not answered by the {feature_id} route
 R21: TODO — add a test asserting a supplied author id in the query is ignored
+R22: story__pitch_a_feature.md
+R23: story__pitch_a_feature.md
+R24: story__pitch_a_feature.md
+R25: story__track_my_pitches.md
+R26: story__pitch_a_feature.md
+R27: TODO — add a test asserting the rejected text is not echoed in the error body
 </coverage>

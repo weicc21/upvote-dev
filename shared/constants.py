@@ -1,12 +1,8 @@
 """Frozen vocabulary shared by backend, orchestrator, and frontend.
 
-This module declares enums, Redis key names, table names, and default
-tunable values.  It is the single source of truth for identifiers that
-appear in Postgres schemas, Redis channels, and cross-service payloads.
-
-This module MUST NOT import anything outside the standard library,
-read environment variables, open files, or perform any I/O at import time.
-It MUST NOT expose mutable module-level state.
+This module is the single source of truth for enum labels, table names,
+Redis key templates, and tunable defaults. It performs no I/O and imports
+nothing outside the standard library.
 """
 
 from __future__ import annotations
@@ -15,12 +11,12 @@ from enum import StrEnum
 from typing import Final
 
 # ---------------------------------------------------------------------------
-# Enums — values reproduce Postgres labels byte-for-byte (R1, R8, R9)
+# Postgres enum types — values are byte-for-byte matches of schema.sql labels
 # ---------------------------------------------------------------------------
 
 
 class FeatureStatus(StrEnum):
-    """Postgres ``feature_status`` enum — uppercase values."""
+    """feature_status enum in Postgres. Uppercase values."""
 
     VOTING = "VOTING"
     CONSOLIDATING = "CONSOLIDATING"
@@ -32,7 +28,7 @@ class FeatureStatus(StrEnum):
 
 
 class BroadcastPhase(StrEnum):
-    """Postgres ``broadcast_phase`` enum — lowercase values."""
+    """broadcast_phase enum in Postgres. Lowercase values."""
 
     SCREENING = "screening"
     SYNTHESIZING = "synthesizing"
@@ -42,12 +38,7 @@ class BroadcastPhase(StrEnum):
 
 
 class DecisionPhase(StrEnum):
-    """Postgres ``decision_phase`` enum — lowercase values.
-
-    Used as the ``decision_log.phase`` column.  Not to be confused with
-    :class:`DecisionType`, which classifies the decision *inside* the
-    ``decision_log.decision`` JSON payload.
-    """
+    """decision_phase enum — the ``decision_log.phase`` column. Lowercase values."""
 
     SCREENING = "screening"
     DEDUP = "dedup"
@@ -58,17 +49,22 @@ class DecisionPhase(StrEnum):
 
 
 class BuildStatus(StrEnum):
-    """Postgres ``build_status`` enum — lowercase values."""
+    """build_status enum in Postgres. Lowercase values."""
 
     SUCCESS = "success"
     FAILED = "failed"
 
 
-class DecisionType(StrEnum):
-    """Classification recorded inside ``decision_log.decision`` JSON.
+# ---------------------------------------------------------------------------
+# Non-Postgres enums — travel on Redis / inside JSON, never as PG enum types
+# ---------------------------------------------------------------------------
 
-    This is **not** a Postgres enum — it is a logical tag that travels in
-    JSON payloads.
+
+class DecisionType(StrEnum):
+    """Classification recorded inside ``decision_log.decision`` JSON payload.
+
+    This is **not** a Postgres enum — it is a different axis from
+    :class:`DecisionPhase`.
     """
 
     SCREENING_REJECT = "screening_reject"
@@ -82,11 +78,11 @@ class DecisionType(StrEnum):
 
 
 class RejectionReason(StrEnum):
-    """Reasons a pitch resolves without becoming a public row.
+    """Every way a pitch resolves without becoming its own public row.
 
-    Includes ``merged`` (a dedup outcome, not a rejection per se).
-    Travels on the Redis ``screening_results`` channel; never reaches
-    Postgres.
+    ``MERGED`` is a dedup outcome rather than a rejection (US-03). These
+    values travel on the Redis ``screening_results`` channel and never
+    reach Postgres.
     """
 
     SECURITY = "security"
@@ -97,7 +93,7 @@ class RejectionReason(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Table names — verbatim Postgres identifiers (R2)
+# Table names — verbatim matches of schema.sql CREATE TABLE identifiers
 # ---------------------------------------------------------------------------
 
 TABLE_FEATURE_REQUESTS: Final[str] = "feature_requests"
@@ -108,7 +104,7 @@ TABLE_DECISION_LOG: Final[str] = "decision_log"
 TABLE_BUILD_LOGS: Final[str] = "build_logs"
 
 # ---------------------------------------------------------------------------
-# Redis key names / templates (R7)
+# Redis key names / templates
 # ---------------------------------------------------------------------------
 
 REDIS_FEATURE_INTAKE: Final[str] = "feature_intake"
@@ -120,7 +116,7 @@ REDIS_PENDING_PITCH: Final[str] = "pending_pitch:{author_id}:{feature_id}"
 REDIS_PITCH_RATE: Final[str] = "rate:pitch:{author_id}"
 
 # ---------------------------------------------------------------------------
-# Default tunables (R3)
+# Tunable defaults — every one is overridable via environment in shared/config
 # ---------------------------------------------------------------------------
 
 DEFAULT_PITCH_COIN_LIMIT: Final[int] = 5
@@ -128,3 +124,9 @@ DEFAULT_UPVOTE_THRESHOLD: Final[int] = 10
 DEFAULT_SPRINT_CADENCE_SECONDS: Final[int] = 86_400  # daily
 DEFAULT_MAX_RETRIES: Final[int] = 3
 DEFAULT_PENDING_PITCH_TTL_SECONDS: Final[int] = 900  # 15 minutes
+
+# LLM screening defaults
+DEFAULT_LLM_MODEL_SCREENING: Final[str] = "MiniMax-M2.5-highspeed"
+DEFAULT_LLM_TEMPERATURE: Final[float] = 0.2
+DEFAULT_LLM_TIMEOUT_SECONDS: Final[int] = 30
+DEFAULT_LLM_MAX_ATTEMPTS: Final[int] = 2

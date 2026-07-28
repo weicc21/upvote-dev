@@ -15,6 +15,10 @@ from pydantic_settings import BaseSettings, NoDecode
 
 
 from shared.constants import (
+    DEFAULT_LLM_MAX_ATTEMPTS,
+    DEFAULT_LLM_MODEL_SCREENING,
+    DEFAULT_LLM_TEMPERATURE,
+    DEFAULT_LLM_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
     DEFAULT_PENDING_PITCH_TTL_SECONDS,
     DEFAULT_PITCH_COIN_LIMIT,
@@ -67,6 +71,12 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = DEFAULT_MAX_RETRIES
     PENDING_PITCH_TTL_SECONDS: int = DEFAULT_PENDING_PITCH_TTL_SECONDS
 
+    # LLM screening tunables — fallbacks from shared/constants.py (R2, R11)
+    LLM_MODEL_SCREENING: str = DEFAULT_LLM_MODEL_SCREENING
+    LLM_TEMPERATURE: float = DEFAULT_LLM_TEMPERATURE
+    LLM_TIMEOUT_SECONDS: int = DEFAULT_LLM_TIMEOUT_SECONDS
+    LLM_MAX_ATTEMPTS: int = DEFAULT_LLM_MAX_ATTEMPTS
+
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
@@ -106,14 +116,26 @@ class Settings(BaseSettings):
         "SPRINT_CADENCE_SECONDS",
         "MAX_RETRIES",
         "PENDING_PITCH_TTL_SECONDS",
+        "LLM_TIMEOUT_SECONDS",
+        "LLM_MAX_ATTEMPTS",
     )
     @classmethod
     def _must_be_positive(cls, v: int, info: object) -> int:  # noqa: ANN401
-        """Reject non-positive tunables at import (R7)."""
+        """Reject non-positive tunables at import (R7, R12)."""
         if v <= 0:
             # info is a FieldValidationInfo but we only need the field name
             field_name = getattr(info, "field_name", "tunable")
             raise ValueError(f"{field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("LLM_TEMPERATURE")
+    @classmethod
+    def _temperature_in_range(cls, v: float) -> float:
+        """Reject LLM_TEMPERATURE outside 0.0–2.0 at import (R12)."""
+        if v < 0.0 or v > 2.0:
+            raise ValueError(
+                f"LLM_TEMPERATURE must be between 0.0 and 2.0 inclusive, got {v}"
+            )
         return v
 
     @model_validator(mode="after")
