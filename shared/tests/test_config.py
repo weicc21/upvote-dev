@@ -188,3 +188,35 @@ def test_module_exposes_single_settings_instance() -> None:
 
 def test_target_prompt_dir_is_a_path() -> None:
     assert isinstance(_build().TARGET_PROMPT_DIR, Path)
+
+
+# --------------------------------------------------------------------------
+# R13 — one model setting per agent role
+# --------------------------------------------------------------------------
+
+def test_r13_each_role_has_its_own_model_setting() -> None:
+    from shared.constants import (
+        DEFAULT_LLM_MODEL_ARCHITECT,
+        DEFAULT_LLM_MODEL_PM,
+        DEFAULT_LLM_MODEL_SCREENING,
+    )
+
+    s = _build()
+    assert s.LLM_MODEL_SCREENING == DEFAULT_LLM_MODEL_SCREENING
+    assert s.LLM_MODEL_PM == DEFAULT_LLM_MODEL_PM
+    assert s.LLM_MODEL_ARCHITECT == DEFAULT_LLM_MODEL_ARCHITECT
+
+
+def test_r13_one_role_can_move_without_touching_the_others() -> None:
+    """The whole point of separate pins."""
+    s = _build(LLM_MODEL_PM="some-other-model")
+    assert s.LLM_MODEL_PM == "some-other-model"
+    assert s.LLM_MODEL_SCREENING != "some-other-model"
+    assert s.LLM_MODEL_ARCHITECT != "some-other-model"
+
+
+def test_r13_env_pins_are_honoured() -> None:
+    s = _build(LLM_MODEL_SCREENING="m-screen", LLM_MODEL_PM="m-pm",
+               LLM_MODEL_ARCHITECT="m-arch", LLM_TEMPERATURE="0.7")
+    assert (s.LLM_MODEL_SCREENING, s.LLM_MODEL_PM, s.LLM_MODEL_ARCHITECT) == ("m-screen", "m-pm", "m-arch")
+    assert s.LLM_TEMPERATURE == 0.7

@@ -15,6 +15,10 @@
 
 Implement `orchestrator/ingestion_service.py` — a long-running process, not an ASGI app.
 
+Import the two agents by symbol — `from orchestrator.pm_agent import classify` and
+`from orchestrator.screener import screen_pitch` — not as modules. One import style, so a
+regeneration does not silently move where the seam is.
+
 Import the screener as `from orchestrator.screener import screen_pitch`. The Python package is
 `orchestrator/`; `orchestration/` is the prompt directory and is not importable.
 
@@ -57,11 +61,13 @@ R4 (MUST): `await screen_pitch(...)` for every well-formed item and act only on 
 R16 (MUST): Treat `ScreeningUnavailable` as its own outcome, `unavailable` — log at ERROR with the `feature_id`, drop the item, continue. It means no verdict was obtained, so inserting would publish unscreened content and is forbidden; but it is an infrastructure failure rather than a rejected pitch, and conflating the two would hide a model outage inside a normal-looking rejection count.
 R5 (MUST NOT): Persist a rejected pitch's title or description anywhere, logs included. Unscreened content lives only in Redis under the API's TTL, and that invariant is what keeps it off the public board (US-02).
 R6 (MUST): Insert a survivor into `feature_requests` using the payload's own `feature_id` as the primary key, its `author_id`, status `VOTING`, and `upvotes` 1. Reusing the id is what lets the author's tray match the new row to their pending entry (US-06); a fresh uuid would orphan it.
+R26 (MUST): Insert a `feature_votes` row for the pitch's author against the new feature, in the same step as the board row. The row is created with `upvotes` 1 representing the author's own vote, so without a matching vote row that vote exists only as a number — the author can then upvote their own pitch and be counted twice, and `viewer_has_voted` reads false for them. This is the same invariant R21 enforces on the merge path; both paths that add to `upvotes` must add the vote row that justifies it.
+R27 (MUST): Treat a unique-violation on that vote insert as already-counted — log at INFO and continue reporting `inserted`. The board row is the durable outcome; a redelivered item must not fail because the author's vote was already recorded.
 R7 (MUST): Take the status from `FeatureStatus.VOTING`, never the literal string. The enum is a physical contract with the Postgres type and the only guard against a casing drift that matches zero rows.
 R8 (MUST): Treat a unique-violation on insert as `duplicate` — log at INFO and continue. A redelivered id must never raise, and the primary key is what makes the insert idempotent.
 R9 (MUST NOT): Set `merge_count`, `extends_id`, `parent_id`, `split_depth`, or `unlock_threshold`. Each belongs to a later phase, and a value invented here would be indistinguishable from a real dedup or split result.
 R10 (MUST): Log one line per item at INFO carrying `feature_id` and the outcome tag, never the pitch text. This log is the only visibility into the daemon and is what shows a queue draining during a demo.
-R11 (MUST): Build the Supabase and Redis clients once at startup and close both on shutdown. A client per item would open a connection per pitch.
+R11 (MUST): Build the Supabase and Redis clients once at startup — a client per item would open a connection per pitch. On shutdown close Redis with `await aclose()` and leave the Supabase client alone: it has no public close, and `auth.sign_out()` is not one — that is a network call ending a user session, which a service-role client does not have.
 R12 (MUST): Handle `SIGINT` and `SIGTERM` by setting the stop event and letting the in-flight item finish, so shutdown never abandons a pitch between its `BRPOP` and its insert.
 R13 (MUST): Keep an unexpected exception on one item from killing the loop — log it with the `feature_id`, drop the item, continue. The daemon's uptime is what the whole pipeline depends on.
 R14 (MUST): Expose `main()` as a sync wrapper over `asyncio.run(run())` with an `if __name__ == "__main__"` guard, so it runs as `python -m orchestrator.ingestion_service`. It is a daemon and MUST NOT be started under uvicorn.
@@ -133,4 +139,6 @@ R22: docs/user_stories/story__upvote_a_feature.md
 R23: docs/user_stories/story__dedup_against_existing_features.md
 R24: docs/user_stories/story__dedup_against_existing_features.md
 R25: docs/user_stories/story__decision_log.md
+R26: docs/user_stories/story__upvote_a_feature.md
+R27: docs/user_stories/story__upvote_a_feature.md
 </coverage>

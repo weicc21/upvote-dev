@@ -125,8 +125,10 @@ DEFAULT_SPRINT_CADENCE_SECONDS: Final[int] = 86_400  # daily
 DEFAULT_MAX_RETRIES: Final[int] = 3
 DEFAULT_PENDING_PITCH_TTL_SECONDS: Final[int] = 900  # 15 minutes
 
-# LLM screening defaults
+# LLM defaults — one model id per agent role, plus shared knobs
 DEFAULT_LLM_MODEL_SCREENING: Final[str] = "MiniMax-M2.5-highspeed"
+DEFAULT_LLM_MODEL_PM: Final[str] = "MiniMax-M2.5-highspeed"
+DEFAULT_LLM_MODEL_ARCHITECT: Final[str] = "MiniMax-M2.7"
 DEFAULT_LLM_TEMPERATURE: Final[float] = 0.2
 DEFAULT_LLM_TIMEOUT_SECONDS: Final[int] = 30
 DEFAULT_LLM_MAX_ATTEMPTS: Final[int] = 2

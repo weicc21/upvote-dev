@@ -44,6 +44,11 @@ Verified against this project's `.venv`; the plausible-looking alternatives do n
 | Settings | `from pydantic_settings import BaseSettings, NoDecode` | `pydantic.BaseSettings` |
 | Enums | `from enum import StrEnum` | `(str, Enum)` mixin — see `constants_python.prompt` R8 |
 
+Client shutdown: the Redis client closes with `await client.aclose()`. The Supabase async client
+exposes **no** public close in this version — let it be garbage-collected. Never call
+`supabase.auth.sign_out()` to "close" it: that is a network round-trip ending a user session, and
+a service-role client has none.
+
 ## Database functions (called via `supabase.rpc`)
 
 PostgREST resolves a function by its exact named-argument set, so a guessed extra parameter fails
@@ -58,6 +63,23 @@ at runtime with `PGRST202 Could not find the function`, not at import.
 
 `set_updated_at` is a trigger and is never called directly. No other function exists in
 `schema.sql`; if a module needs one, add it to the schema first.
+
+## Which model each agent uses
+
+Pinned per role, so one role can move to a different model without touching the others. A module
+MUST read the setting for its own role — `pm_agent` reading `LLM_MODEL_SCREENING` compiles, passes
+tests, and silently ignores the operator's PM pin.
+
+| Module | Setting | Why |
+|---|---|---|
+| `orchestrator/screener.py` | `settings.LLM_MODEL_SCREENING` | classification-shaped, runs on every pitch — fast tier |
+| `orchestrator/pm_agent.py` | `settings.LLM_MODEL_PM` | comparison against the board — fast tier |
+| `orchestrator/architect.py` (US-08) | `settings.LLM_MODEL_ARCHITECT` | reasoning-heavy spec writing — stronger model |
+
+All three share `settings.LLM_BASE_URL`, `settings.LLM_API_KEY`, `settings.LLM_TEMPERATURE`,
+`settings.LLM_TIMEOUT_SECONDS`, and `settings.LLM_MAX_ATTEMPTS`. Temperature is deliberately one
+value: every one of these calls is a classification or a structured extraction, and none of them
+wants a chatty default.
 
 ## Rule
 

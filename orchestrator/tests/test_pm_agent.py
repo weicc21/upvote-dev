@@ -240,10 +240,29 @@ def test_r14_no_client_is_built_at_import() -> None:
 
 
 def test_module_performs_no_db_or_redis_io() -> None:
-    """The caller supplies the candidates and performs every write."""
-    src = MODULE_SRC.read_text()
-    for forbidden in ("supabase", "create_client", "redis", "brpop", ".table("):
-        assert forbidden not in src.lower(), f"pm_agent must not do I/O: {forbidden}"
+    """The caller supplies the candidates and performs every write.
+
+    Checked on the AST, not the text — the module docstring legitimately says
+    "never touches Postgres, Redis, or the filesystem", and a substring scan
+    flags its own disclaimer.
+    """
+    import ast
+
+    tree = ast.parse(MODULE_SRC.read_text())
+
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".")[0])
+    for banned in ("redis", "supabase", "postgrest", "psycopg", "sqlalchemy"):
+        assert banned not in roots, f"pm_agent must not import {banned}"
+
+    io_methods = {"table", "rpc", "brpop", "lpush", "execute", "insert", "from_url"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in io_methods, f"pm_agent must not call .{node.func.attr}()"
 
 
 async def test_does_not_mutate_its_inputs() -> None:
@@ -252,3 +271,20 @@ async def test_does_not_mutate_its_inputs() -> None:
     await classify(p, backlog=BACKLOG, shipped=SHIPPED,
                    judge=judge_returning({"outcome": "new_unique", "target_id": None, "detail": "d"}))
     assert p == before_pitch and list(BACKLOG) == before_backlog
+
+
+# ==========================================================================
+# R17 — per-role model pin
+# ==========================================================================
+
+def test_r17_uses_the_pm_model_not_the_screening_one() -> None:
+    """Reading LLM_MODEL_SCREENING here compiles, passes every behavioural test,
+    and silently ignores the operator's PM pin. Only a source check catches it."""
+    src = MODULE_SRC.read_text()
+    assert "LLM_MODEL_PM" in src, "pm_agent must read its own role's model setting"
+    assert "LLM_MODEL_SCREENING" not in src, "that is the screener's pin"
+    assert "LLM_MODEL_ARCHITECT" not in src, "that is the architect's pin"
+
+
+def test_r17_temperature_comes_from_settings() -> None:
+    assert "LLM_TEMPERATURE" in MODULE_SRC.read_text()

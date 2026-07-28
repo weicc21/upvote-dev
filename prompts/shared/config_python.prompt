@@ -57,6 +57,8 @@ Settings, by group. Required keys have no default and MUST NOT be given one:
 | `MAX_RETRIES` | `int` | no | `DEFAULT_MAX_RETRIES` |
 | `PENDING_PITCH_TTL_SECONDS` | `int` | no | `DEFAULT_PENDING_PITCH_TTL_SECONDS` |
 | `LLM_MODEL_SCREENING` | `str` | no | `DEFAULT_LLM_MODEL_SCREENING` |
+| `LLM_MODEL_PM` | `str` | no | `DEFAULT_LLM_MODEL_PM` |
+| `LLM_MODEL_ARCHITECT` | `str` | no | `DEFAULT_LLM_MODEL_ARCHITECT` |
 | `LLM_TEMPERATURE` | `float` | no | `DEFAULT_LLM_TEMPERATURE` |
 | `LLM_TIMEOUT_SECONDS` | `int` | no | `DEFAULT_LLM_TIMEOUT_SECONDS` |
 | `LLM_MAX_ATTEMPTS` | `int` | no | `DEFAULT_LLM_MAX_ATTEMPTS` |
@@ -89,6 +91,7 @@ validation, so a comma-separated value raises `SettingsError` at import and R5's
 runs — the setting is unreadable in every environment, including production.
 R11 (MUST): Accept `LLM_BASE_URL` as any OpenAI-compatible endpoint. This deployment points it at MiniMax (`https://api.minimax.io/v1`) with `LLM_MODEL_SCREENING` naming a MiniMax model, but nothing in the type or validation may assume that vendor — swapping provider is a base-URL, key, and model change and MUST NOT require a code change.
 R12 (MUST): Reject a non-positive `LLM_TIMEOUT_SECONDS` or `LLM_MAX_ATTEMPTS`, and an `LLM_TEMPERATURE` outside 0.0–2.0, at import. A zero attempt cap would skip screening entirely and admit unscreened content, which is the one failure US-02 exists to prevent.
+R13 (MUST): Expose the three model ids as separate settings, each falling back to its own `DEFAULT_`. A module picks the one matching its role — screening, PM, or architect — so an operator can move one role to a different model without touching the other two.
 </contract_rules>
 
 `SUPABASE_SERVICE_KEY` is the service-role key: `schema.sql` relies on the service role bypassing
@@ -107,6 +110,7 @@ R9: TODO — add a test asserting a wildcard FORUM_ORIGIN is rejected at import
 R10: story__preview_the_shipped_feature.md
 R11: story__screen_incoming_pitches.md
 R12: story__screen_incoming_pitches.md
+R13: story__architect_writes_acceptance_criteria.md
 R2: story__threshold_triggers_a_sprint.md
 R3: TODO — add a story asserting secrets never surface in logs or errors
 R4: TODO — add a test that mutating settings raises

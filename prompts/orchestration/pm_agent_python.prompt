@@ -58,6 +58,8 @@ R13 (MUST): Keep `detail` short, factual, and free of the pitch's own text — i
 R14 (MUST): Accept an injected `judge` and use it when given; build the default lazily from `settings`, so importing this module needs no configured LLM and no network.
 R15 (MUST NOT): Hard-code a provider name, model id, base URL, or key. All four come from `settings`.
 R16 (MUST NOT): Treat a near-match as a duplicate on wording alone. Two pitches are duplicates when they ask for the same capability, not when they share vocabulary — merging distinct requests silently destroys one, and unlike a missed merge that cannot be undone by a later vote.
+R18 (MUST): Echo the input pitch's `feature_id` onto the `Classification`. The caller correlates the decision with the queue item it came from, and an empty id makes a merge impossible to attribute and a log line impossible to trace.
+R17 (MUST): Take the model from `settings.LLM_MODEL_PM` and the temperature from `settings.LLM_TEMPERATURE`. `LLM_MODEL_SCREENING` is the screener's pin — reading it here compiles and passes every test while silently ignoring the operator's PM setting, which is why the role is named rather than left to inference.
 </contract_rules>
 
 <pdd>
@@ -103,4 +105,6 @@ R13: docs/user_stories/story__screen_incoming_pitches.md
 R14: TODO — add a test asserting importing the module builds no client
 R15: TODO — add a test asserting no vendor string appears in the module
 R16: docs/user_stories/story__dedup_against_existing_features.md
+R17: docs/user_stories/story__dedup_against_existing_features.md
+R18: docs/user_stories/story__dedup_against_existing_features.md
 </coverage>

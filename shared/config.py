@@ -16,6 +16,8 @@ from pydantic_settings import BaseSettings, NoDecode
 
 from shared.constants import (
     DEFAULT_LLM_MAX_ATTEMPTS,
+    DEFAULT_LLM_MODEL_ARCHITECT,
+    DEFAULT_LLM_MODEL_PM,
     DEFAULT_LLM_MODEL_SCREENING,
     DEFAULT_LLM_TEMPERATURE,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -71,8 +73,10 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = DEFAULT_MAX_RETRIES
     PENDING_PITCH_TTL_SECONDS: int = DEFAULT_PENDING_PITCH_TTL_SECONDS
 
-    # LLM screening tunables — fallbacks from shared/constants.py (R2, R11)
+    # LLM tunables — fallbacks from shared/constants.py (R2, R11, R13)
     LLM_MODEL_SCREENING: str = DEFAULT_LLM_MODEL_SCREENING
+    LLM_MODEL_PM: str = DEFAULT_LLM_MODEL_PM
+    LLM_MODEL_ARCHITECT: str = DEFAULT_LLM_MODEL_ARCHITECT
     LLM_TEMPERATURE: float = DEFAULT_LLM_TEMPERATURE
     LLM_TIMEOUT_SECONDS: int = DEFAULT_LLM_TIMEOUT_SECONDS
     LLM_MAX_ATTEMPTS: int = DEFAULT_LLM_MAX_ATTEMPTS

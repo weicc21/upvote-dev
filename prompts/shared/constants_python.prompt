@@ -25,6 +25,8 @@
   {"name":"DEFAULT_MAX_RETRIES","signature":"Final[int]","returns":"3"},
   {"name":"DEFAULT_PENDING_PITCH_TTL_SECONDS","signature":"Final[int]","returns":"900 (15 minutes)"},
   {"name":"DEFAULT_LLM_MODEL_SCREENING","signature":"Final[str]","returns":"\"MiniMax-M2.5-highspeed\""},
+  {"name":"DEFAULT_LLM_MODEL_PM","signature":"Final[str]","returns":"\"MiniMax-M2.5-highspeed\""},
+  {"name":"DEFAULT_LLM_MODEL_ARCHITECT","signature":"Final[str]","returns":"\"MiniMax-M2.7\""},
   {"name":"DEFAULT_LLM_TEMPERATURE","signature":"Final[float]","returns":"0.2"},
   {"name":"DEFAULT_LLM_TIMEOUT_SECONDS","signature":"Final[int]","returns":"30"},
   {"name":"DEFAULT_LLM_MAX_ATTEMPTS","signature":"Final[int]","returns":"2"}
@@ -70,7 +72,8 @@ interpolating one into a Redis key, a query filter, or a payload silently emits
 to prevent, and one that reads correctly at every call site.
 R9 (MUST): Guarantee `str(member) == member.value` and `f"{member}" == member.value` for all six
 enums, so a member is substitutable for its wire string anywhere without an explicit `.value`.
-R10 (MUST): Expose the screening model id, temperature, request timeout, and attempt cap as `DEFAULT_`-prefixed constants so `shared/config.py` has a fallback for each. The values are a starting point for one deployment, not a fixed property of the system — every one is overridable by environment.
+R10 (MUST): Expose one model-id constant **per agent role** — screening, PM, architect — plus temperature, request timeout, and attempt cap as `DEFAULT_`-prefixed constants so `shared/config.py` has a fallback for each. The values are a starting point for one deployment, not a fixed property of the system — every one is overridable by environment.
+R11 (MUST): Keep the three model ids as separate constants even when two currently hold the same value. They are pinned per role on purpose — classification-shaped work runs on a fast tier while the architect needs a stronger model — and collapsing them to one removes the ability to move a single role.
 </contract_rules>
 
 Legality of a status change is enforced where the change is made, not here.
@@ -99,4 +102,5 @@ R7: story__pitch_a_feature.md
 R8: story__browse_the_pipeline_board.md
 R9: story__browse_the_pipeline_board.md
 R10: story__screen_incoming_pitches.md
+R11: story__architect_writes_acceptance_criteria.md
 </coverage>

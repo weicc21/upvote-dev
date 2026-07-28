@@ -282,8 +282,10 @@ async def test_r17_system_prompt_states_the_precedence() -> None:
     sys_l = calls[0][0].lower()
     assert "precedence" in sys_l or "order" in sys_l, "the ordering must be stated to the model"
     assert "unclear" in sys_l and "off_topic" in sys_l
-    # the worked example: a mismatch is unclear, never off_topic
-    assert "mismatch" in sys_l or "different feature" in sys_l
+    # the unclear criterion must be about the two fields disagreeing, however phrased
+    unclear_section = sys_l[sys_l.index("unclear"):]
+    assert "title" in unclear_section and "description" in unclear_section, \
+        "the unclear criterion must be stated in terms of the two fields disagreeing"
 
 
 async def test_r6a_mismatch_is_reported_as_unclear() -> None:
@@ -305,3 +307,10 @@ def test_r6_module_documents_the_three_axes_in_order() -> None:
     src = MODULE_SRC.read_text().lower()
     sec, unc, off = src.find("security"), src.find("unclear"), src.find("off_topic")
     assert -1 not in (sec, unc, off), "all three categories must appear"
+
+
+def test_r14_uses_the_screening_model_not_another_role() -> None:
+    src = MODULE_SRC.read_text()
+    assert "LLM_MODEL_SCREENING" in src
+    assert "LLM_MODEL_PM" not in src, "that is the PM agent's pin"
+    assert "LLM_MODEL_ARCHITECT" not in src, "that is the architect's pin"

@@ -402,7 +402,7 @@ def _classify_as(outcome: Outcome, target_id=None, target_title=None):
 
 
 async def test_r19_new_unique_inserts_without_extends_columns(sb: FakeSupabase, monkeypatch) -> None:
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.new_unique))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
     assert await svc.process_one(item(), sb) == "inserted"
     row = sb.inserts[0]["row"]
     assert "extends_id" not in row and "extends_title" not in row
@@ -410,7 +410,7 @@ async def test_r19_new_unique_inserts_without_extends_columns(sb: FakeSupabase, 
 
 async def test_r19_extends_shipped_sets_both_extends_columns(sb: FakeSupabase, monkeypatch) -> None:
     """extends_title is denormalised so a card renders 'builds on' with no second query."""
-    monkeypatch.setattr(svc.pm_agent, "classify",
+    monkeypatch.setattr(svc, "classify",
                         _classify_as(Outcome.extends_shipped, BASE, "Login with email"))
     assert await svc.process_one(item(), sb) == "inserted"
     row = sb.inserts[0]["row"]
@@ -420,14 +420,14 @@ async def test_r19_extends_shipped_sets_both_extends_columns(sb: FakeSupabase, m
 
 async def test_r20_duplicate_inserts_no_feature_row(sb: FakeSupabase, monkeypatch) -> None:
     """A merge concentrates demand; a second row would scatter it again."""
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
     assert await svc.process_one(item(), sb) == "merged"
     feature_inserts = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS]
     assert feature_inserts == [], "a duplicate must not create a board row"
 
 
 async def test_r20_duplicate_increments_the_canonical_row_atomically(sb: FakeSupabase, monkeypatch) -> None:
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
     await svc.process_one(item(), sb)
     assert any(fn == "increment_upvotes" for fn, _ in sb.rpc_calls), \
         "the merge must use the atomic RPC, not a read-then-write"
@@ -436,7 +436,7 @@ async def test_r20_duplicate_increments_the_canonical_row_atomically(sb: FakeSup
 async def test_r21_merge_writes_a_vote_row_for_the_author(sb: FakeSupabase, monkeypatch) -> None:
     """Without this the merging author is in `upvotes` but has no vote row,
     so viewer_has_voted reads false and they can vote again — one person, two votes."""
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
     await svc.process_one(item(), sb)
     votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
     assert votes, "no feature_votes row written for the merged author"
@@ -445,7 +445,7 @@ async def test_r21_merge_writes_a_vote_row_for_the_author(sb: FakeSupabase, monk
 
 
 async def test_r23_already_shipped_writes_nothing(sb: FakeSupabase, monkeypatch) -> None:
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.already_shipped, BASE, "Login with email"))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.already_shipped, BASE, "Login with email"))
     assert await svc.process_one(item(), sb) == "already_shipped"
     assert sb.inserts == [] and sb.rpc_calls == []
 
@@ -454,7 +454,7 @@ async def test_r24_a_raising_classifier_still_publishes(sb: FakeSupabase, monkey
     """Dedup fails open — an outage must not lose a screened pitch."""
     async def _boom(pitch, **kw):
         raise RuntimeError("classifier exploded")
-    monkeypatch.setattr(svc.pm_agent, "classify", _boom)
+    monkeypatch.setattr(svc, "classify", _boom)
     assert await svc.process_one(item(), sb) == "inserted"
 
 
@@ -467,7 +467,7 @@ async def test_r25_outcomes_are_reported_distinctly(sb: FakeSupabase, monkeypatc
         (Outcome.already_shipped, BASE, "Login"),
     ]:
         fresh = FakeSupabase()
-        monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(outcome, target, title))
+        monkeypatch.setattr(svc, "classify", _classify_as(outcome, target, title))
         seen.add(await svc.process_one(item(), fresh))
     assert seen == {"inserted", "merged", "already_shipped"}
 
@@ -480,7 +480,7 @@ async def test_r18_candidate_sets_are_read_before_classifying(sb: FakeSupabase, 
         return Classification(feature_id=pitch["feature_id"], outcome=Outcome.new_unique,
                               target_id=None, target_title=None, detail="t")
 
-    monkeypatch.setattr(svc.pm_agent, "classify", _spy)
+    monkeypatch.setattr(svc, "classify", _spy)
     await svc.process_one(item(), sb)
     assert "backlog" in captured, "classify was called without candidate sets"
 
@@ -489,9 +489,51 @@ async def test_r20_rpc_is_called_with_exactly_row_id(sb: FakeSupabase, monkeypat
     """PostgREST matches on the exact named-argument set. An invented `inc`
     parameter fails at runtime with PGRST202, which is how the merge silently
     stopped transferring votes while still reporting success."""
-    monkeypatch.setattr(svc.pm_agent, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.duplicate, CANON, "Dark mode"))
     await svc.process_one(item(), sb)
     calls = [c for c in sb.rpc_calls if c[0] == "increment_upvotes"]
     assert calls, "increment_upvotes was never called"
     assert set(calls[0][1]) == {"row_id"}, f"wrong argument set: {sorted(calls[0][1])}"
     assert calls[0][1]["row_id"] == CANON
+
+
+async def test_r26_insert_writes_the_authors_vote_row(sb: FakeSupabase, monkeypatch) -> None:
+    """`upvotes: 1` represents the author's own vote. Without a matching row that
+    vote exists only as a number — the author can upvote their own pitch and be
+    counted twice, which a live run demonstrated."""
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    assert await svc.process_one(item(), sb) == "inserted"
+
+    votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
+    assert votes, "no vote row written for the author of a new feature"
+    assert votes[0]["row"]["feature_id"] == FID
+    assert votes[0]["row"]["user_id"] == AUTHOR
+
+
+async def test_r26_every_upvote_is_backed_by_a_vote_row(sb: FakeSupabase, monkeypatch) -> None:
+    """Both paths that add to `upvotes` must add the row that justifies it."""
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    await svc.process_one(item(), sb)
+    feature = [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS][0]["row"]
+    votes = [i for i in sb.inserts if i["table"] == "feature_votes"]
+    assert feature["upvotes"] == len(votes), \
+        f"upvotes={feature['upvotes']} but {len(votes)} vote row(s)"
+
+
+async def test_r27_duplicate_vote_row_does_not_fail_the_insert(sb: FakeSupabase, monkeypatch) -> None:
+    """A redelivered item must not fail because the vote was already recorded."""
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setattr(svc, "classify", _classify_as(Outcome.new_unique))
+    original = sb.table
+
+    def _table(name: str):
+        q = original(name)
+        if name == "feature_votes":
+            sb.raise_on_insert = APIError({"code": "23505", "message": "duplicate key"})
+        else:
+            sb.raise_on_insert = None
+        return q
+
+    monkeypatch.setattr(sb, "table", _table)
+    assert await svc.process_one(item(), sb) == "inserted"
