@@ -48,46 +48,14 @@ signup, profile, or accounts table in the MVP (US-01).
 
 ## Startup and shutdown
 
-<contract_rules>
-R1 (MUST): Build the Supabase and Redis clients exactly once inside an `asynccontextmanager`
-lifespan, and bind them by assigning into `app.dependency_overrides[get_supabase]` and
-`[get_redis]`. A module-level client global MUST NOT exist — a test that imports this module
-must not open a socket.
-R2 (MUST): Close both clients on shutdown, each guarded so a failure closing one still closes the
-other.
-R3 (MUST): Take every value from the imported `settings` object. Re-reading the environment or
-constructing a second `Settings` here is a defect even when the values would match.
-R4 (MUST): Log one WARNING at startup when `DEV_MODE` is true, naming it as spoofable and
-never-for-production. It is the switch that disables signature verification, so its state must be
-visible in the logs of any environment it is on in.
-</contract_rules>
+Governed by R1–R4 in the contract rules below.
 
 ## Caller identity (US-01: no account setup ceremony)
 
 One HTTP middleware resolves the caller and stamps `request.state.user_id`. `backend/deps.py`
 only reads that attribute, so this is the single place identity is decided.
 
-<contract_rules>
-R5 (MUST): Stamp `request.state.user_id` on **every** request — the resolved id, or `None`. It
-MUST always be set, so `get_optional_user_id` never raises `AttributeError` on an anonymous read.
-R6 (MUST NOT): Return `401` from the middleware, ever. A request with no usable credential
-continues with `user_id = None`; whether that is fatal is the route's decision, made by depending
-on `get_current_user_id` (401) or `get_optional_user_id` (None). Rejecting here would break the
-anonymous board reads (US-05) that share the same middleware.
-R7 (MUST): When `DEV_MODE` is false, verify the Supabase JWT signature and expiry using
-`SUPABASE_JWT_SECRET` before trusting any claim, and take the id from the `sub` claim. A
-malformed, expired, or unverifiable token resolves to `None` — never to a partially trusted id.
-R8 (MUST): Treat a Supabase **anonymous** session's JWT as fully valid. It verifies identically to
-a registered user's, and the middleware MUST NOT branch on an `is_anonymous` claim: pitching needs
-a resolvable caller id, not a completed signup. This is the mechanism behind US-01's "no account
-setup ceremony".
-R9 (MUST): When `DEV_MODE` is true, skip verification entirely and take the id from the
-`X-Dev-User` header, falling back to one fixed anonymous-session UUID when the header is absent.
-This is what lets `curl` and the demo act as distinct users with no account management. It is
-spoofable by design and MUST NOT be reachable when `DEV_MODE` is false.
-R10 (MUST NOT): Log, echo, or place a caller id or a raw token in any response body, header, or
-log line — including at DEBUG.
-</contract_rules>
+Governed by R5–R10 in the contract rules below.
 
 ## Error envelope
 
@@ -96,27 +64,29 @@ default `{"detail"}`. A route can only honour that for errors it raises itself; 
 failures, unmatched paths, and unhandled exceptions are produced by the framework. Closing that
 gap is this module's job.
 
-<contract_rules>
-R11 (MUST): Install exception handlers so `RequestValidationError`, `HTTPException`, and any
-unhandled `Exception` all serialise to the envelope from `backend/deps.py`. A `{"detail": ...}`
-body MUST NOT be reachable on any path.
-R12 (MUST): Map a body that fails schema validation to `400` with `error.code`
-`validation_failed` — not FastAPI's default `422`, which `openapi.yaml` reserves for
-`not_votable` on the upvote route. Two different meanings on one status is a bug the frontend
-cannot untangle.
-R13 (MUST): Give the unhandled-`Exception` handler a `500` with fixed, friendly copy and no
-exception text, stack frame, query, or pitch content. Log the detail server-side instead.
-</contract_rules>
+Governed by R11–R13 in the contract rules below.
 
 ## Wiring
 
+Governed by R14–R16 in the contract rules below.
+
 <contract_rules>
-R14 (MUST): Register the `features` and `votes` routers, and only those two. Both declare the
-same `/api/features` prefix; that is intended and they compose.
-R15 (MUST): Restrict CORS to `FORUM_ORIGIN` only. A wildcard origin MUST NOT be used — writes
-carry a bearer token.
-R16 (MUST): Expose the app as the module-level name `app`, so the service starts as
-`uvicorn backend.main:app` with no factory argument.
+R1 (MUST): Build the Supabase and Redis clients exactly once inside an `asynccontextmanager` lifespan, and bind them by assigning into `app.dependency_overrides[get_supabase]` and `[get_redis]`. A module-level client global MUST NOT exist — a test that imports this module must not open a socket.
+R2 (MUST): Close both clients on shutdown, each guarded so a failure closing one still closes the other.
+R3 (MUST): Take every value from the imported `settings` object. Re-reading the environment or constructing a second `Settings` here is a defect even when the values would match.
+R4 (MUST): Log one WARNING at startup when `DEV_MODE` is true, naming it as spoofable and never-for-production. It is the switch that disables signature verification, so its state must be visible in the logs of any environment it is on in.
+R5 (MUST): Stamp `request.state.user_id` on **every** request — the resolved id, or `None`. It MUST always be set, so `get_optional_user_id` never raises `AttributeError` on an anonymous read.
+R6 (MUST NOT): Return `401` from the middleware, ever. A request with no usable credential continues with `user_id = None`; whether that is fatal is the route's decision, made by depending on `get_current_user_id` (401) or `get_optional_user_id` (None). Rejecting here would break the anonymous board reads (US-05) that share the same middleware.
+R7 (MUST): When `DEV_MODE` is false, verify the Supabase JWT signature and expiry using `SUPABASE_JWT_SECRET` before trusting any claim, and take the id from the `sub` claim. A malformed, expired, or unverifiable token resolves to `None` — never to a partially trusted id.
+R8 (MUST): Treat a Supabase **anonymous** session's JWT as fully valid. It verifies identically to a registered user's, and the middleware MUST NOT branch on an `is_anonymous` claim: pitching needs a resolvable caller id, not a completed signup. This is the mechanism behind US-01's "no account setup ceremony".
+R9 (MUST): When `DEV_MODE` is true, skip verification entirely and take the id from the `X-Dev-User` header, falling back to one fixed anonymous-session UUID when the header is absent. This is what lets `curl` and the demo act as distinct users with no account management. It is spoofable by design and MUST NOT be reachable when `DEV_MODE` is false.
+R10 (MUST NOT): Log, echo, or place a caller id or a raw token in any response body, header, or log line — including at DEBUG.
+R11 (MUST): Install exception handlers so `RequestValidationError`, `HTTPException`, and any unhandled `Exception` all serialise to the envelope from `backend/deps.py`. A `{"detail": ...}` body MUST NOT be reachable on any path.
+R12 (MUST): Map a body that fails schema validation to `400` with `error.code` `validation_failed` — not FastAPI's default `422`, which `openapi.yaml` reserves for `not_votable` on the upvote route. Two different meanings on one status is a bug the frontend cannot untangle.
+R13 (MUST): Give the unhandled-`Exception` handler a `500` with fixed, friendly copy and no exception text, stack frame, query, or pitch content. Log the detail server-side instead.
+R14 (MUST): Register the `features` and `votes` routers, and only those two. Both declare the same `/api/features` prefix; that is intended and they compose.
+R15 (MUST): Restrict CORS to `FORUM_ORIGIN` only. A wildcard origin MUST NOT be used — writes carry a bearer token.
+R16 (MUST): Expose the app as the module-level name `app`, so the service starts as `uvicorn backend.main:app` with no factory argument.
 </contract_rules>
 
 <pdd>
