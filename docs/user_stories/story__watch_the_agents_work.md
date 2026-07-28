@@ -15,6 +15,13 @@ so that the build process feels transparent and alive instead of a black box.
 - Event copy names the agent and describes the step in plain language.
 - Pitch content never appears in the public ticker — only phase and micro-copy.
 
+- The ticker names each agent — Guardagent, PM Agent, Architect Agent, Janitor Agent, Ship Agent — and walks them in pipeline order, so the strip doubles as an explanation of how the system works.
+- A "shipped" event is visibly different from the rest and points the visitor at the sandbox preview, because a build landing is the one event worth interrupting a scroll for.
+
 ## Notes
 
 Backs `agent_events` pub/sub → `event_relay` → `broadcast_events` → `broadcast` component.
+
+The `broadcast` component currently cycles a scripted array covering those five agents. The live
+feed replaces the array through the component's `messages` prop and changes no markup — the ticker
+is built, its data source is the part still owed.

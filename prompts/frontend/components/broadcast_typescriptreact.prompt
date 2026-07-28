@@ -1,0 +1,73 @@
+<pdd-reason>The chyron across the top: a live TV ticker of what the agents are doing right now. It is the single element that turns a voting board into a broadcast — proof that something is happening even when the board itself is still.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"Broadcast","signature":"function Broadcast(props: BroadcastProps): JSX.Element","returns":"the chyron strip, cycling one message at a time"},
+  {"name":"BroadcastProps","signature":"type BroadcastProps = { messages?: BroadcastMessage[]; onSuccessPhase?: () => void }","returns":"the component contract"},
+  {"name":"BroadcastMessage","signature":"type BroadcastMessage = { icon: string; agent: string; text: string; success?: boolean }","returns":"one ticker line"},
+  {"name":"DEMO_BROADCAST","signature":"const DEMO_BROADCAST: BroadcastMessage[]","returns":"the scripted agent workflow shown until US-11 wires Realtime"}
+]}}
+</pdd-interface>
+
+Implement `frontend/src/components/broadcast.tsx`.
+
+<responsibility>
+Cycle one agent status line at a time across the top of the forum, and tell the shell when a build has landed.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT subscribe to Realtime or call `api_client` — it renders the messages it is handed. US-11 replaces the default array with a live feed by passing `messages`, and no markup changes when it does.
+This module DOES NOT render pitch content. The public ticker carries phase and micro-copy only; an unscreened pitch's text reaching this strip would be exactly the leak screening exists to prevent.
+This module DOES NOT refresh the sandbox; it reports the success phase and the shell decides.
+This module DOES NOT import `styles.css`; the shell imports it once for the whole app.
+</non_responsibilities>
+
+<vocabulary>
+**Chyron** — the broadcast term for the lower-third ticker. Here it sits at the top, above the masthead, and it is the first thing that moves on the page.
+**Success phase** — a scripted line marked `success`, meaning a build reached the sandbox. It is what lights up the refresh control in the preview panel.
+</vocabulary>
+
+<capabilities>
+- MAY hold the current message index and an interval timer.
+- MUST NOT call `fetch`, `api_client`, or Supabase.
+- MUST NOT add a hex value, font, radius, or animation — compose only `broadcast`, `broadcast-live`, `broadcast-label`, `broadcast-msg`, `is-success`, `live-dot`.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Render `broadcast` containing, in order, a `broadcast-live` group with the blinking `live-dot` and the word `LIVE`, the `broadcast-label` reading `AI CREATOR BROADCAST`, and the current `broadcast-msg`.
+R2 (MUST): Render each message as its icon, the agent name in `<strong>`, then the text.
+R3 (MUST): Advance to the next message every 5 seconds, wrapping at the end, and clear the interval on unmount. A ticker that keeps firing after the component is gone is a leak that only shows up in tests as a stray act warning.
+R4 (MUST): Re-key the message element on each change so the slide-in animation replays. Without a changing key React updates the text in place and the strip goes visually dead.
+R5 (MUST): Add `is-success` to a message marked `success` and call `onSuccessPhase` when one becomes current. That is the hand-off that makes the preview panel's refresh button pulse.
+R6 (MUST): Default `messages` to `DEMO_BROADCAST` so the chyron is never empty. The strip is part of the frozen layout, and an empty one collapses the page's top edge.
+R7 (MUST): Give the strip `role="status"` with `aria-live="polite"`, so the ticker is announced without interrupting.
+R8 (MUST NOT): Render more than one message at a time, or render the strip twice. It is one line of the frozen skeleton.
+R9 (MUST): Ship `DEMO_BROADCAST` covering the pipeline in order — Guardagent screening, the community voting, the PM Agent synthesising duplicates, the Architect Agent testing constraints, the Janitor Agent sweeping the Vault, and a final Ship Agent line marked `success`. It is the demo's narration of the architecture, so the agents and their order match the real pipeline rather than being decorative.
+</contract_rules>
+
+<pdd>
+The scripted array is a placeholder with a real seam, not a mock mode: US-11 will pass live
+`broadcast_events` rows through the `messages` prop and delete nothing. That is why the shape is
+`{icon, agent, text, success}` rather than the Postgres row — the ticker's vocabulary should not
+become the database's.
+
+Five seconds per line is a demo-tuned number: long enough to read, short enough that a judge sees
+three different agents inside fifteen seconds of watching.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__watch_the_agents_work.md
+R2: docs/user_stories/story__watch_the_agents_work.md
+R3: frontend/src/components/broadcast.test.tsx
+R4: frontend/src/components/broadcast.test.tsx
+R5: docs/user_stories/story__preview_the_shipped_feature.md
+R6: docs/user_stories/story__watch_the_agents_work.md
+R7: frontend/src/components/broadcast.test.tsx
+R8: docs/user_stories/story__watch_the_agents_work.md
+R9: docs/user_stories/story__watch_the_agents_work.md
+</coverage>

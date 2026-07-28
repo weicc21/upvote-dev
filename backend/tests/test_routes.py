@@ -359,3 +359,61 @@ async def test_r15_cors_is_never_wildcard(make_client) -> None:
         "/api/features?view=pipeline", headers={"Origin": "http://localhost:5173"}
     )
     assert r.headers.get("access-control-allow-origin") != "*"
+
+
+# ==========================================================================
+# R29-R33 — root rows only, children embedded (US-05)
+# ==========================================================================
+
+PARENT_ID = "aaaa1111-1111-4111-8111-111111111111"
+CHILD_A = "bbbb2222-2222-4222-8222-222222222222"
+CHILD_B = "cccc3333-3333-4333-8333-333333333333"
+
+
+def _family() -> list[dict]:
+    base = {"description": "d", "created_at": "2026-07-28T00:00:00Z", "upvotes": 0}
+    return [
+        {**base, "id": PARENT_ID, "title": "Habit customisation", "status": "SPLIT",
+         "parent_id": None, "upvotes": 1},
+        {**base, "id": CHILD_A, "title": "Per-habit colour", "status": "VOTING", "parent_id": PARENT_ID},
+        {**base, "id": CHILD_B, "title": "Drag to reorder", "status": "VOTING", "parent_id": PARENT_ID},
+    ]
+
+
+async def test_r29_children_are_not_listed_as_top_level_cards(make_client, fake_supabase) -> None:
+    """A split rendered as three unrelated cards hides the idea they came from."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = _family()
+    body = make_client().get("/api/features?view=pipeline").json()
+    top_ids = {f["id"] for f in body["features"]}
+    assert CHILD_A not in top_ids and CHILD_B not in top_ids
+    assert PARENT_ID in top_ids
+
+
+async def test_r30_parent_embeds_its_children(make_client, fake_supabase) -> None:
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = _family()
+    body = make_client().get("/api/features?view=pipeline").json()
+    parent = next(f for f in body["features"] if f["id"] == PARENT_ID)
+    kids = {c["id"] for c in parent.get("children", [])}
+    assert kids == {CHILD_A, CHILD_B}
+
+
+async def test_r33_children_is_a_list_never_null(make_client, fake_supabase) -> None:
+    """The frontend maps over it directly."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
+        {"id": FID, "title": "Solo feature", "description": "d", "status": "VOTING",
+         "upvotes": 3, "created_at": "2026-07-28T00:00:00Z", "parent_id": None},
+    ]
+    body = make_client().get("/api/features?view=pipeline").json()
+    assert body["features"][0].get("children") is not None
+    assert isinstance(body["features"][0].get("children", []), list)
+
+
+async def test_r31_a_child_is_still_reachable_directly(make_client, fake_supabase) -> None:
+    """Root-only is a rule about lists; an author must still find their children."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
+        {"id": CHILD_A, "title": "Per-habit colour", "description": "d", "status": "VOTING",
+         "upvotes": 0, "created_at": "2026-07-28T00:00:00Z", "parent_id": PARENT_ID},
+    ]
+    r = make_client().get(f"/api/features/{CHILD_A}")
+    assert r.status_code == 200
+    assert r.json()["id"] == CHILD_A

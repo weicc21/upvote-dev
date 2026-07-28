@@ -1,7 +1,8 @@
-"""Pitch intake and public board reads.
+"""Feature pitch intake and public board routes.
 
-Accepts a pitch into Redis without ever persisting it, and serves the
-board from Postgres.
+This module accepts pitches onto the Redis intake queue and reads the public
+board from Postgres.  It never writes to Postgres, never calls an LLM, and
+never screens, deduplicates, classifies, or publishes a pitch.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import redis.asyncio as aioredis
+import redis.asyncio
 from fastapi import APIRouter, Depends, Query
 from supabase._async.client import AsyncClient
 
@@ -30,17 +31,133 @@ from shared.config import Settings
 from shared.constants import (
     DEFAULT_PENDING_PITCH_TTL_SECONDS,
     DEFAULT_PITCH_COIN_LIMIT,
+    FeatureStatus,
     REDIS_FEATURE_INTAKE,
     REDIS_PENDING_PITCH,
     REDIS_PITCH_RATE,
     TABLE_FEATURE_REQUESTS,
-    FeatureStatus,
 )
 
 router = APIRouter(prefix="/api/features", tags=["features"])
 
 # ---------------------------------------------------------------------------
-# View → status mapping for the board
+# Helpers — text cleaning & validation
+# ---------------------------------------------------------------------------
+
+# Codepoints to strip unconditionally (control + format categories, plus
+# explicit zero-width / bidi overrides that unicodedata sometimes classifies
+# outside Cc/Cf).
+_EXTRA_STRIP = frozenset(
+    "\u200b\u200c\u200d\u200e\u200f"  # zero-width
+    "\u2028\u2029"  # line/paragraph separator
+    "\u202a\u202b\u202c\u202d\u202e"  # bidi
+    "\u2066\u2067\u2068\u2069"  # bidi isolates
+    "\ufeff"  # BOM / ZWNBSP
+    "\ufff9\ufffa\ufffb"  # interlinear annotation
+)
+
+# Tag-like constructs — matches <tag, </tag, <script, and HTML entity
+# escapes for the same.  Does NOT match bare < or > so "width < 300px" is
+# fine.
+_HTML_TAG_RE = re.compile(
+    r"<\s*/?\s*[a-zA-Z]"  # <tag or </tag
+    r"|&lt;\s*/?\s*[a-zA-Z]"  # &lt;tag entity-escaped
+    r"|&#0*60;\s*/?\s*[a-zA-Z]"  # &#60;tag decimal entity
+    r"|&#[xX]0*3[cC];\s*/?\s*[a-zA-Z]",  # &#x3c;tag hex entity
+    re.IGNORECASE,
+)
+
+
+def _strip_control(text: str, *, allow_newline_tab: bool) -> str:
+    """Remove Unicode control / format characters.
+
+    When *allow_newline_tab* is True, ``\\n`` and ``\\t`` are preserved
+    (description field).  Title is single-line so they are stripped there.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch in _EXTRA_STRIP:
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("Cc") or cat.startswith("Cf"):
+            if allow_newline_tab and ch in ("\n", "\t"):
+                out.append(ch)
+                continue
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _validate_and_clean(title_raw: str, description_raw: str) -> tuple[str, str]:
+    """Apply R22-R27: clean, reject HTML, enforce length on cleaned text.
+
+    Returns (clean_title, clean_description) or raises via ``raise_error``.
+    """
+    # R22 — strip control characters
+    title = _strip_control(title_raw, allow_newline_tab=False)
+    description = _strip_control(description_raw, allow_newline_tab=True)
+
+    # R23 — reject HTML / script markup (R27: never echo offending text)
+    if _HTML_TAG_RE.search(title):
+        raise_error(
+            400,
+            "validation_failed",
+            "title must not contain HTML or script markup.",
+        )
+    if _HTML_TAG_RE.search(description):
+        raise_error(
+            400,
+            "validation_failed",
+            "description must not contain HTML or script markup.",
+        )
+
+    # R24 — length bounds on *cleaned* text
+    if len(title) < 1 or len(title) > 60:
+        raise_error(
+            400,
+            "validation_failed",
+            "title must be between 1 and 60 characters after cleaning.",
+        )
+    if len(description) < 30 or len(description) > 300:
+        raise_error(
+            400,
+            "validation_failed",
+            "description must be between 30 and 300 characters after cleaning.",
+        )
+
+    return title, description
+
+
+# ---------------------------------------------------------------------------
+# Keyset cursor helpers
+# ---------------------------------------------------------------------------
+
+def _encode_cursor(sort: str, row: dict[str, Any]) -> str:
+    """Build an opaque cursor from the last row on the page."""
+    import base64
+
+    if sort == "new":
+        payload = json.dumps({"ca": row["created_at"], "id": row["id"]})
+    else:  # top
+        payload = json.dumps(
+            {"uv": row["upvotes"], "ca": row["created_at"], "id": row["id"]}
+        )
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _decode_cursor(cursor: str, sort: str) -> dict[str, Any]:
+    """Decode an opaque cursor. Returns dict with keyset values."""
+    import base64
+
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception:
+        raise_error(400, "invalid_cursor", "The cursor value is malformed.")
+    return payload  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# View → status mapping
 # ---------------------------------------------------------------------------
 
 _VIEW_STATUSES: dict[str, list[str]] = {
@@ -48,147 +165,38 @@ _VIEW_STATUSES: dict[str, list[str]] = {
         FeatureStatus.VOTING,
         FeatureStatus.CONSOLIDATING,
         FeatureStatus.IN_SPRINT,
+        FeatureStatus.SPLIT,
     ],
     "shipped": [FeatureStatus.COMPILED],
-    "holding": [FeatureStatus.POSTPONED_CONFLICT, FeatureStatus.SPLIT],
+    "holding": [FeatureStatus.POSTPONED_CONFLICT],
     "vault": [FeatureStatus.ARCHIVED],
 }
 
-_VALID_VIEWS = frozenset(_VIEW_STATUSES)
-
-# All canonical status values that the `status` CSV filter may contain
-_CANONICAL_STATUSES = frozenset(s.value for s in FeatureStatus)
 
 # ---------------------------------------------------------------------------
-# Sanitisation helpers (R22–R27)
+# Feature serialisation
 # ---------------------------------------------------------------------------
 
-# Characters to strip: Unicode categories Cc and Cf, plus explicit
-# zero-width / bidi codepoints.  We keep \n and \t conditionally.
-_CONTROL_RE_TITLE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f"  # Cc minus \t(\x09) and \n(\x0a)
-    r"\u00ad\u034f\u061c"
-    r"\u115f\u1160\u17b4\u17b5"
-    r"\u180b-\u180f"
-    r"\u200b-\u200f"
-    r"\u202a-\u202e"
-    r"\u2060-\u206f"
-    r"\u3164"
-    r"\ufe00-\ufe0f"
-    r"\ufeff\uffa0"
-    r"\ufff0-\ufff8"
-    r"\U000e0001\U000e0020-\U000e007f"
-    r"\U000e0100-\U000e01ef"
-    r"\t\n"  # title is single-line: strip \t and \n too
-    r"]+",
-)
-
-_CONTROL_RE_DESC = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f"  # Cc minus \t and \n
-    r"\u00ad\u034f\u061c"
-    r"\u115f\u1160\u17b4\u17b5"
-    r"\u180b-\u180f"
-    r"\u200b-\u200f"
-    r"\u202a-\u202e"
-    r"\u2060-\u206f"
-    r"\u3164"
-    r"\ufe00-\ufe0f"
-    r"\ufeff\uffa0"
-    r"\ufff0-\ufff8"
-    r"\U000e0001\U000e0020-\U000e007f"
-    r"\U000e0100-\U000e01ef"
-    r"]+",
-)
-
-# HTML / script detection (R23): tag-like constructs and HTML entity escapes
-# for the same.  Bare < or > alone do NOT match.
-_HTML_RE = re.compile(
-    r"<\s*/?\s*[a-zA-Z]"  # <tag, </tag, < tag
-    r"|&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);",  # &#60; &#x3c; &lt;
-    re.IGNORECASE,
+_FEATURE_COLUMNS = (
+    "id, title, description, status, upvotes, author_id, author_handle, "
+    "parent_id, created_at, updated_at"
 )
 
 
-def _strip_controls(text: str, *, is_title: bool) -> str:
-    """Remove Unicode control / invisible characters (R22)."""
-    pattern = _CONTROL_RE_TITLE if is_title else _CONTROL_RE_DESC
-    # Also strip Cf-category chars that the regex might miss via unicodedata
-    cleaned = pattern.sub("", text)
-    # Second pass: any remaining Cc/Cf chars (belt-and-suspenders)
-    result: list[str] = []
-    for ch in cleaned:
-        cat = unicodedata.category(ch)
-        if cat == "Cc":
-            # Keep \n and \t in description only
-            if not is_title and ch in ("\n", "\t"):
-                result.append(ch)
-            # else drop
-        elif cat == "Cf":
-            pass  # drop
-        else:
-            result.append(ch)
-    return "".join(result)
-
-
-def _check_html(text: str, field: str) -> None:
-    """Reject text containing HTML / script markup (R23, R27)."""
-    if _HTML_RE.search(text):
-        raise_error(
-            400,
-            "validation_failed",
-            f"{field} must not contain HTML or script markup.",
-        )
-
-
-def _validate_and_clean(title_raw: str, desc_raw: str) -> tuple[str, str]:
-    """Full R22–R27 pipeline. Returns (clean_title, clean_description)."""
-    # R22: strip controls first
-    title = _strip_controls(title_raw, is_title=True).strip()
-    description = _strip_controls(desc_raw, is_title=False).strip()
-
-    # R23: reject HTML (on cleaned text — controls already gone)
-    _check_html(title, "title")
-    _check_html(description, "description")
-
-    # R24: length bounds on cleaned text
-    if len(title) < 1 or len(title) > 60:
-        raise_error(
-            400,
-            "validation_failed",
-            "title must be between 1 and 60 characters.",
-        )
-    if len(description) < 30 or len(description) > 300:
-        raise_error(
-            400,
-            "validation_failed",
-            "description must be between 30 and 300 characters.",
-        )
-
-    return title, description
-
-
-# ---------------------------------------------------------------------------
-# Keyset cursor helpers (R10)
-# ---------------------------------------------------------------------------
-
-
-def _encode_cursor(sort_value: Any, feature_id: str) -> str:
-    """Produce an opaque cursor string from the sort column value + id."""
-    import base64
-
-    payload = json.dumps({"v": str(sort_value), "id": feature_id})
-    return base64.urlsafe_b64encode(payload.encode()).decode()
-
-
-def _decode_cursor(cursor: str) -> tuple[str, str]:
-    """Return (sort_value_str, feature_id) from an opaque cursor."""
-    import base64
-
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-        return payload["v"], payload["id"]
-    except Exception:
-        raise_error(400, "validation_failed", "Invalid cursor.")
+def _row_to_feature(row: dict[str, Any], children: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Convert a Postgres row to the public Feature shape (R6: no author_id)."""
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "description": row["description"],
+        "status": row["status"],
+        "upvotes": row["upvotes"],
+        "author_handle": row.get("author_handle"),  # nullable, never invented
+        "parent_id": row.get("parent_id"),
+        "created_at": row["created_at"],
+        "updated_at": row.get("updated_at"),
+        "children": children if children is not None else [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -207,30 +215,29 @@ def _decode_cursor(cursor: str) -> tuple[str, str]:
 async def create_pitch(
     body: dict[str, Any],
     author_id: str = Depends(get_current_user_id),
-    rds: aioredis.Redis = Depends(get_redis),  # type: ignore[type-arg]
+    rds: redis.asyncio.Redis = Depends(get_redis),  # type: ignore[type-arg]
     cfg: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    # --- basic shape check ---
-    if not isinstance(body.get("title"), str) or not isinstance(
-        body.get("description"), str
-    ):
-        raise_error(
-            400,
-            "validation_failed",
-            "title and description are required strings.",
-        )
+    """Accept a pitch onto the intake queue (R1–R7, R22–R28)."""
 
-    title_raw: str = body["title"]
-    desc_raw: str = body["description"]
+    # --- basic shape ---
+    if "title" not in body or "description" not in body:
+        raise_error(400, "validation_failed", "Both title and description are required.")
 
-    # R26: validate/clean BEFORE coin check
-    # R22–R25: sanitise and validate
-    title, description = _validate_and_clean(title_raw, desc_raw)
+    title_raw = body.get("title")
+    description_raw = body.get("description")
+
+    if not isinstance(title_raw, str) or not isinstance(description_raw, str):
+        raise_error(400, "validation_failed", "title and description must be strings.")
+
+    # R26 — validate *before* coin check
+    # R22-R25 — clean, reject HTML, enforce length on cleaned text
+    title, description = _validate_and_clean(title_raw, description_raw)
 
     # --- Pitch Coin gate (R4, R5) ---
     rate_key = REDIS_PITCH_RATE.format(author_id=author_id)
     current = await rds.get(rate_key)
-    limit = getattr(cfg, "pitch_coin_limit", DEFAULT_PITCH_COIN_LIMIT)
+    limit = getattr(cfg, "PITCH_COIN_LIMIT", DEFAULT_PITCH_COIN_LIMIT)
 
     if current is not None and int(current) >= limit:
         # Compute resets_at: next UTC midnight (R5)
@@ -251,7 +258,7 @@ async def create_pitch(
             resets_at=resets_at,
         )
 
-    # --- Generate id and timestamp ---
+    # --- generate id & timestamp ---
     feature_id = str(uuid.uuid4())
     submitted_at = datetime.now(timezone.utc).isoformat()
 
@@ -259,20 +266,18 @@ async def create_pitch(
     pending_key = REDIS_PENDING_PITCH.format(
         author_id=author_id, feature_id=feature_id
     )
-    pending_ttl = getattr(
-        cfg, "pending_pitch_ttl_seconds", DEFAULT_PENDING_PITCH_TTL_SECONDS
-    )
     pending_record = json.dumps(
         {
             "feature_id": feature_id,
-            "title": title,  # R25: cleaned text
+            "title": title,  # R25 — cleaned text
             "state": "screening",
             "submitted_at": submitted_at,
         }
     )
-    await rds.set(pending_key, pending_record, ex=pending_ttl)
+    ttl = getattr(cfg, "PENDING_PITCH_TTL_SECONDS", DEFAULT_PENDING_PITCH_TTL_SECONDS)
+    await rds.set(pending_key, pending_record, ex=ttl)
 
-    # --- Enqueue intake (R28: exactly five keys) ---
+    # --- LPUSH to intake (R28: exactly five keys) ---
     envelope = json.dumps(
         {
             "feature_id": feature_id,
@@ -284,83 +289,79 @@ async def create_pitch(
     )
     await rds.lpush(REDIS_FEATURE_INTAKE, envelope)
 
-    # --- Spend the coin AFTER successful enqueue ---
-    pipe = rds.pipeline(transaction=True)
-    pipe.incr(rate_key)
-    # Compute seconds until next UTC midnight for EXPIRE
-    now_utc = datetime.now(timezone.utc)
-    next_midnight = now_utc.replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    from datetime import timedelta
+    # --- Increment coin counter (R5: per UTC calendar day) ---
+    new_count = await rds.incr(rate_key)
+    if new_count == 1:
+        # First pitch today — set expiry to next UTC midnight
+        now_utc = datetime.now(timezone.utc)
+        from datetime import timedelta
 
-    next_midnight = next_midnight + timedelta(days=1)
-    ttl_seconds = int((next_midnight - now_utc).total_seconds()) + 1
-    pipe.expire(rate_key, ttl_seconds)
-    await pipe.execute()
+        tomorrow = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        seconds_until_midnight = int((tomorrow - now_utc).total_seconds())
+        if seconds_until_midnight <= 0:
+            seconds_until_midnight = 86400
+        await rds.expire(rate_key, seconds_until_midnight)
 
-    # R1: frozen response shape
+    # R1 — frozen response shape
     return {"feature_id": feature_id, "state": "screening"}
 
 
 # ---------------------------------------------------------------------------
-# GET /api/features/mine  (US-06)
-# R20: declared BEFORE the {feature_id} route
+# GET /api/features/mine  (US-06) — R20: declared BEFORE {feature_id}
 # ---------------------------------------------------------------------------
 
 
-@router.get(
-    "/mine",
-    responses={401: {"model": ErrorResponse}},
-)
+@router.get("/mine")
 async def list_my_pitches(
-    author_id: str = Depends(get_current_user_id),  # R21
-    rds: aioredis.Redis = Depends(get_redis),  # type: ignore[type-arg]
-    db: AsyncClient = Depends(get_supabase),
+    author_id: str = Depends(get_current_user_id),
+    rds: redis.asyncio.Redis = Depends(get_redis),  # type: ignore[type-arg]
+    supabase: AsyncClient = Depends(get_supabase),
 ) -> dict[str, Any]:
+    """The author's private view: pending (Redis) + persisted (Postgres).
+
+    R14-R21.
+    """
+
     # --- Postgres: author's board rows (R18) ---
-    resp = (
-        await db.table(TABLE_FEATURE_REQUESTS)
-        .select("*")
+    resp = await (
+        supabase.table(TABLE_FEATURE_REQUESTS)
+        .select(_FEATURE_COLUMNS)
         .eq("author_id", author_id)
+        .order("created_at", desc=True)
         .execute()
     )
-    features: list[dict[str, Any]] = resp.data or []
+    pg_rows: list[dict[str, Any]] = resp.data or []
+    pg_feature_ids: set[str] = {r["id"] for r in pg_rows}
 
-    # Strip author_id from each feature row (R6)
-    board_feature_ids: set[str] = set()
-    cleaned_features: list[dict[str, Any]] = []
-    for f in features:
-        f.pop("author_id", None)
-        board_feature_ids.add(f["id"])
-        cleaned_features.append(f)
+    features = [_row_to_feature(r) for r in pg_rows]
 
-    # --- Redis: pending pitches via SCAN (R15, R16) ---
+    # --- Redis: pending pitches (R15, R16) ---
     prefix = f"pending_pitch:{author_id}:*"
     pending: list[dict[str, Any]] = []
     cursor_val: int | bytes = 0
     while True:
-        cursor_val, keys = await rds.scan(
-            cursor=cursor_val, match=prefix, count=100
-        )
+        cursor_val, keys = await rds.scan(cursor=cursor_val, match=prefix, count=100)
         for key in keys:
             raw = await rds.get(key)
             if raw is None:
                 continue
             record = json.loads(raw)
-            # R17: skip if already on the board
-            if record.get("feature_id") in board_feature_ids:
+            # R17 — skip if already on the board
+            if record.get("feature_id") in pg_feature_ids:
                 continue
             pending.append(record)
         if cursor_val == 0:
             break
 
-    # R14: frozen shape
-    return {"pending": pending, "features": cleaned_features}
+    # Sort pending by submitted_at descending for consistency
+    pending.sort(key=lambda p: p.get("submitted_at", ""), reverse=True)
+
+    # R14 — frozen shape
+    return {"pending": pending, "features": features}
 
 
 # ---------------------------------------------------------------------------
-# GET /api/features/{feature_id}  (US-05, single)
+# GET /api/features/{feature_id}
 # ---------------------------------------------------------------------------
 
 
@@ -371,25 +372,39 @@ async def list_my_pitches(
 async def get_feature(
     feature_id: str,
     _user_id: str | None = Depends(get_optional_user_id),
-    db: AsyncClient = Depends(get_supabase),
+    supabase: AsyncClient = Depends(get_supabase),
 ) -> dict[str, Any]:
-    resp = (
-        await db.table(TABLE_FEATURE_REQUESTS)
-        .select("*")
+    """Return a single feature by id (R13, R31)."""
+
+    resp = await (
+        supabase.table(TABLE_FEATURE_REQUESTS)
+        .select(_FEATURE_COLUMNS)
         .eq("id", feature_id)
         .execute()
     )
-    rows = resp.data or []
+    rows: list[dict[str, Any]] = resp.data or []
     if not rows:
-        raise_error(404, "not_found", "Feature not found.")  # R13
+        raise_error(404, "not_found", "Feature not found.")
 
-    feature = rows[0]
-    feature.pop("author_id", None)  # R6
-    return feature
+    row = rows[0]
+
+    # Load children if this is a SPLIT parent (R30)
+    children: list[dict[str, Any]] = []
+    if row.get("status") == FeatureStatus.SPLIT:
+        child_resp = await (
+            supabase.table(TABLE_FEATURE_REQUESTS)
+            .select(_FEATURE_COLUMNS)
+            .eq("parent_id", feature_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        children = [_row_to_feature(c) for c in (child_resp.data or [])]
+
+    return _row_to_feature(row, children=children)
 
 
 # ---------------------------------------------------------------------------
-# GET /api/features  (US-05, list / board)
+# GET /api/features  (US-05)
 # ---------------------------------------------------------------------------
 
 
@@ -405,20 +420,25 @@ async def list_features(
     cursor: str | None = Query(None),
     limit: int = Query(30, ge=1, le=100),
     _user_id: str | None = Depends(get_optional_user_id),
-    db: AsyncClient = Depends(get_supabase),
+    supabase: AsyncClient = Depends(get_supabase),
 ) -> dict[str, Any]:
-    # --- Validate view (R9) ---
-    if view not in _VALID_VIEWS:
-        raise_error(400, "validation_failed", f"Unknown view: {view}")
+    """List features by view with keyset pagination (R8-R13, R29-R33)."""
 
-    # --- Validate sort (R9) ---
+    # --- validate view ---
+    if view not in _VIEW_STATUSES:
+        raise_error(
+            400,
+            "validation_failed",
+            f"view must be one of: {', '.join(_VIEW_STATUSES.keys())}.",
+        )
+
+    # --- validate sort ---
     if sort not in ("top", "new"):
-        raise_error(400, "validation_failed", f"Unknown sort: {sort}")
+        raise_error(400, "validation_failed", "sort must be 'top' or 'new'.")
 
-    # --- Determine statuses to filter ---
-    statuses = list(_VIEW_STATUSES[view])
+    # --- determine statuses ---
+    allowed_statuses = _VIEW_STATUSES[view]
 
-    # R12: status CSV filter (pipeline view only)
     if status is not None:
         if view != "pipeline":
             raise_error(
@@ -427,77 +447,91 @@ async def list_features(
                 "status filter is only valid for the pipeline view.",
             )
         requested = [s.strip() for s in status.split(",") if s.strip()]
+        # R12 — reject unknown status values
+        valid_enum_values = {e.value for e in FeatureStatus}
         for s in requested:
-            if s not in _CANONICAL_STATUSES:
-                raise_error(400, "validation_failed", f"Unknown status: {s}")
-        # Intersect with the view's allowed statuses
-        allowed = set(_VIEW_STATUSES[view])
-        statuses = [s for s in requested if s in allowed]
-        if not statuses:
-            return {"features": [], "next_cursor": None}
+            if s not in valid_enum_values:
+                raise_error(
+                    400,
+                    "validation_failed",
+                    f"Unknown status value: use one of {', '.join(sorted(valid_enum_values))}.",
+                )
+            if s not in allowed_statuses:
+                raise_error(
+                    400,
+                    "validation_failed",
+                    f"Status '{s}' is not valid in the pipeline view.",
+                )
+        allowed_statuses = requested
 
-    # --- Sort column ---
-    sort_col = "upvotes" if sort == "top" else "created_at"
-    desc = True  # both sorts are descending
-
-    # --- Build query ---
+    # R29 — root rows only (parent_id is null)
     query = (
-        db.table(TABLE_FEATURE_REQUESTS)
-        .select("*")
-        .in_("status", statuses)
+        supabase.table(TABLE_FEATURE_REQUESTS)
+        .select(_FEATURE_COLUMNS)
+        .in_("status", allowed_statuses)
+        .is_("parent_id", "null")
     )
 
-    # --- Keyset pagination (R10) ---
-    if cursor is not None:
-        cursor_val, cursor_id = _decode_cursor(cursor)
-        if sort_col == "upvotes":
-            # For descending upvotes: (upvotes, id) < (cursor_val, cursor_id)
-            # PostgREST: or=(upvotes.lt.{v}, and(upvotes.eq.{v},id.gt.{cursor_id}))
-            # We use a simpler approach: filter upvotes <= cursor_val, then
-            # exclude rows we've already seen.
-            query = query.lte(sort_col, int(cursor_val))
-        else:
-            # created_at descending
-            query = query.lte(sort_col, cursor_val)
+    # --- keyset pagination (R10) ---
+    if sort == "top":
+        if cursor:
+            decoded = _decode_cursor(cursor, sort)
+            uv = decoded.get("uv")
+            ca = decoded.get("ca")
+            cid = decoded.get("id")
+            # Keyset: (upvotes, created_at DESC, id DESC)
+            # "less than" in sort order means: lower upvotes, or same upvotes
+            # but older, or same upvotes+created_at but smaller id.
+            query = query.or_(
+                f"upvotes.lt.{uv},"
+                f"and(upvotes.eq.{uv},created_at.lt.{ca}),"
+                f"and(upvotes.eq.{uv},created_at.eq.{ca},id.lt.{cid})"
+            )
+        query = query.order("upvotes", desc=True).order("created_at", desc=True).order("id", desc=True)
+    else:  # new
+        if cursor:
+            decoded = _decode_cursor(cursor, sort)
+            ca = decoded.get("ca")
+            cid = decoded.get("id")
+            query = query.or_(
+                f"created_at.lt.{ca},"
+                f"and(created_at.eq.{ca},id.lt.{cid})"
+            )
+        query = query.order("created_at", desc=True).order("id", desc=True)
 
-    # Order: sort_col desc, then id asc as tiebreaker
-    query = query.order(sort_col, desc=desc).order("id", desc=False)
-
-    # Fetch one extra to detect next page
+    # Fetch limit+1 to know if there's a next page
     query = query.limit(limit + 1)
-
     resp = await query.execute()
     rows: list[dict[str, Any]] = resp.data or []
 
-    # If we have a cursor, we need to skip rows that match the cursor
-    # position exactly (already seen).
-    if cursor is not None:
-        cursor_val_str, cursor_id = _decode_cursor(cursor)
-        filtered: list[dict[str, Any]] = []
-        for row in rows:
-            row_sort = str(row[sort_col])
-            row_id = row["id"]
-            if row_sort == cursor_val_str and row_id <= cursor_id:
-                continue
-            filtered.append(row)
-        rows = filtered
-
-    # Determine next_cursor
-    next_cursor: str | None = None
-    if len(rows) > limit:
+    has_next = len(rows) > limit
+    if has_next:
         rows = rows[:limit]
-        last = rows[-1]
-        next_cursor = _encode_cursor(last[sort_col], last["id"])
 
-    # R6: strip author_id
-    for row in rows:
-        row.pop("author_id", None)
+    # R32 — batch-fetch children for all SPLIT parents on this page
+    split_parent_ids = [r["id"] for r in rows if r.get("status") == FeatureStatus.SPLIT]
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
 
-    # R11: frozen shape
-    result: dict[str, Any] = {"features": rows}
-    if next_cursor is not None:
-        result["next_cursor"] = next_cursor
-    else:
-        result["next_cursor"] = None
+    if split_parent_ids:
+        child_resp = await (
+            supabase.table(TABLE_FEATURE_REQUESTS)
+            .select(_FEATURE_COLUMNS)
+            .in_("parent_id", split_parent_ids)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        for child_row in (child_resp.data or []):
+            pid = child_row["parent_id"]
+            children_by_parent.setdefault(pid, []).append(_row_to_feature(child_row))
+
+    # R33 — always include children as a list (empty if none)
+    features = [
+        _row_to_feature(r, children=children_by_parent.get(r["id"], []))
+        for r in rows
+    ]
+
+    result: dict[str, Any] = {"features": features}
+    if has_next and rows:
+        result["next_cursor"] = _encode_cursor(sort, rows[-1])
 
     return result

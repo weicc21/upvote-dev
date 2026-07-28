@@ -103,6 +103,11 @@ R25 (MUST): Enqueue and store exactly the cleaned text. The string that passed v
 R26 (MUST): Run R22–R24 **before** the Pitch Coin is checked or spent. A submission the server refused outright never got a screening attempt, so charging for it would burn an author's daily allowance on a typo.
 R27 (MUST NOT): Echo the offending text back in the validation message. Name the field and the rule that failed — the copy is displayed verbatim to the author (`openapi.yaml` ErrorBody), and reflecting unscreened input into a response is how a rejected payload reaches a browser.
 R28 (MUST): Write the intake envelope with exactly these five keys — `feature_id`, `author_id`, `title`, `description`, `submitted_at` — and no others. This is a contract between two processes that never import each other: the orchestrator validates the key set exactly and drops anything else as malformed, so adding or removing one here strands every pitch in the queue with no error visible from this side.
+R29 (MUST): Return **root rows only** from `GET /api/features` — rows whose `parent_id` is null. A split child is part of its parent's idea, so listing it top-level turns one pitch into three unrelated cards and hides the parent that explains them.
+R30 (MUST): Embed a `SPLIT` parent's children in its `children` array, ordered oldest-first, each a full `Feature` object. `openapi.yaml` declares the field as "Present on SPLIT parents", and the board renders the family as one card with its parts inside — which is the only presentation where voting on a part makes sense.
+R31 (MUST): Keep returning a child directly from `GET /api/features/{feature_id}` and from `/api/features/mine` when it is the row asked for. Root-only is a rule about *lists*; an author who split a pitch must still find its children in their own tray (US-06).
+R32 (MUST): Fetch children with one query for the whole page, not one per parent. A page of 30 split parents would otherwise issue 31 round-trips on the hottest read in the product.
+R33 (MUST): Always include `children` as a list on every feature in a list response — an empty list when the row has no children, never null and never absent. The frontend maps over it directly, so an omitted key forces every card to guard a field the schema already describes as a list.
 </contract_rules>
 
 <pdd>
@@ -163,4 +168,9 @@ R25: story__track_my_pitches.md
 R26: story__pitch_a_feature.md
 R27: TODO — add a test asserting the rejected text is not echoed in the error body
 R28: docs/user_stories/story__screen_incoming_pitches.md
+R29: story__browse_the_pipeline_board.md
+R30: story__browse_the_pipeline_board.md
+R31: story__browse_the_pipeline_board.md
+R32: story__browse_the_pipeline_board.md
+R33: story__browse_the_pipeline_board.md
 </coverage>

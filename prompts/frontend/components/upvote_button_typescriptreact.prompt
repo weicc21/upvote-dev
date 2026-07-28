@@ -1,0 +1,70 @@
+<pdd-reason>The signature interaction of the whole forum: a squishy arcade button that throws confetti and locks to "Hyped!". Everything else on the board is a list; this is the thing people come to press.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"UpvoteButton","signature":"function UpvoteButton(props: UpvoteButtonProps): JSX.Element","returns":"the hype button, with a particle burst on press"},
+  {"name":"UpvoteButtonProps","signature":"type UpvoteButtonProps = { count: number; voted: boolean; onVote: () => void; small?: boolean; disabled?: boolean; label?: string }","returns":"the component contract"}
+]}}
+</pdd-interface>
+
+Implement `frontend/src/components/upvote_button.tsx`. It imports nothing from `api_client` — it
+is handed a number and a callback.
+
+<responsibility>
+Show a vote count, take one press, and make that press feel like the best thing that happened today.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT know what a Feature is, nor which statuses are votable — the caller decides whether to render it at all.
+This module DOES NOT call the backend or hold the authoritative count; it displays `count` and calls `onVote`.
+This module DOES NOT import `styles.css`; the shell imports it once for the whole app.
+</non_responsibilities>
+
+<vocabulary>
+**Hype** — this product's word for an upvote. The button says "Hype it" before and "Hyped!" after; the noun in accessible copy stays "upvotes" so the control is still findable by a screen-reader user searching for a vote.
+**Burst** — the eight particles thrown on press. Purely decorative, `aria-hidden`, and self-cleaning.
+Duplicate: a second press of a control whose vote is already recorded or already in flight. It produces either a `409` or two requests for one intent, so it is refused here rather than at the server.
+</vocabulary>
+
+<capabilities>
+- MAY hold the list of in-flight bursts as local state.
+- MUST NOT call `fetch`, `api_client`, or Supabase.
+- MUST NOT add a hex value, font, radius, or animation — compose only `upvote`, `is-voted`, `is-small`, `upvote-arrow`, `upvote-count`, `upvote-word`, `burst`.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Render a real `<button>` containing, in order, `▲` in `upvote-arrow`, the count in `upvote-count`, and the word in `upvote-word`. The stylesheet stacks these three vertically and the order is what makes the shape read as an arcade button.
+R2 (MUST): Show `Hype it` before voting and `Hyped!` after, switching on the `voted` prop.
+R3 (MUST): Add `is-voted` when `voted` is true and `is-small` when `small` is true. `is-small` is the variant used inside the unlock tree, where a full-size button would dwarf the node.
+R4 (MUST NOT): Call `onVote` when `voted` is true, or when `disabled` is true. A second press is either a `409` from the server or a duplicate request for one intent.
+R5 (MUST): Throw a burst of exactly eight particles on an accepted press, each carrying its own `--a` angle (`i * 45deg`) and `--d` distance (`26 + (i % 3) * 10` px) as inline custom properties, and remove it from state after the animation. The angles are what make it a burst rather than a smear; inline custom properties are the one exception to "no inline style" because the animation is per-particle and cannot be expressed in a static stylesheet.
+R6 (MUST): Mark the burst `aria-hidden` — it carries no information a non-sighted user needs, and eight animated spans announced individually would be noise.
+R7 (MUST): Set `aria-pressed` from `voted` and give the button an accessible name of `Upvote — {count} upvotes`, or `Hyped — {count} upvotes` once voted. The optional `label` prop, when supplied, names the feature inside that string so a screen-reader user hears which idea they are voting for on a board of twenty.
+R8 (MUST): Reflect `disabled` on the DOM button so the in-flight state is real, not just visual.
+</contract_rules>
+
+<pdd>
+The burst is deliberately keyed by timestamp and swept on a timer rather than driven by
+`animationend`: several presses can overlap, and a missed `animationend` in a background tab would
+otherwise leak particles into the DOM forever.
+
+This component is intentionally ignorant of `Feature`. The unlock tree votes for children and the
+card votes for parents, and both want the same button — coupling it to the wire type would force
+one of them to fabricate a fake feature.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__upvote_a_feature.md
+R2: docs/user_stories/story__upvote_a_feature.md
+R3: docs/user_stories/story__browse_the_pipeline_board.md
+R4: docs/user_stories/story__upvote_a_feature.md
+R5: docs/user_stories/story__upvote_a_feature.md
+R6: frontend/src/components/upvote_button.test.tsx
+R7: docs/user_stories/story__upvote_a_feature.md
+R8: docs/user_stories/story__upvote_a_feature.md
+</coverage>

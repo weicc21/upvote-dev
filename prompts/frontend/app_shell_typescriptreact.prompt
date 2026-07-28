@@ -1,38 +1,148 @@
-# Module: app_shell
-Compile unit for the Forum Frontend.
-Generates: `frontend/src/app_shell.tsx` (current hand-authored code is the reference output)
+<pdd-reason>The application root. It fetches the live board, keeps it moving as votes and stage changes arrive, and holds the frozen layout every other component slots into.</pdd-reason>
 
-## Role
-Root component: state, tabs, routing between views. Imports the frozen `styles.css` (the visual identity, layout skeleton, and vocabulary lock live in the included design guide).
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"AppShell","signature":"function AppShell(): JSX.Element","returns":"the application root: chyron, masthead, tabs, the four tab bodies, sandbox panel, dialogs and toast"}
+]}}
+</pdd-interface>
 
-## Behavior
-- Masthead: brand + tagline; actions row = Pitch Coin chip (🪙 count, tooltip), "🔒 My pitches" button (pending-count badge), "🔥 Pitch a feature" primary CTA.
-- **Pitch Coins**: 5 per day, 1 per submission; at 0, disable the CTA and show a live refresh countdown (never an error); refill with a celebration toast. Server-authoritative in production (a `429` renders as out-of-coins); the local count is presentation only.
-- Tabs: ⚡ Up Next Pipeline · 🏆 Shipped · ⏸ Holding Pattern · 🗄️ The Vault.
-- Pipeline: sort toggle (Highest Upvotes / Newest) + stage filter chips (All + the five pipeline stages, multi-select, friendly empty state). `COMPILED` cards show here only within the 48h celebration window.
-- Shipped: running total blurb + trophy cards, permanent. Holding: blurb + holding cards. Vault: search box + vault cards with reboot.
-- Pending pitches live **only** in the My Pitches dialog — never inline with the public feed.
-- Toasts for: pitched (screening), cleared screening, rejection nudge, unlock, reboot, coin refresh.
+<pdd-dependency>prompts/frontend/api_client_typescript.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/broadcast_typescriptreact.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/feature_card_typescriptreact.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/sandbox_panel_typescriptreact.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/submit_modal_typescriptreact.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/my_pitches_modal_typescriptreact.prompt</pdd-dependency>
 
-## Data
-All reads/writes through the `api_client` module (mock mode supported); statuses are the canonical case-sensitive enum from `prompts/shared/contracts.prompt`. Subscribes via `api_client.subscribe`: `onFeatureUpdate` merges the updated row into whichever list currently holds that `id` (by upvote count, status, or unlock progress) so every open tab reflects an upvote or stage change live, not just the tab that clicked. `onFeatureInsert` branches on `parent_id`: **`null`** → add as a new top-level card to the relevant view; **set** → this is a SPLIT child, so attach/merge it into its parent's `children` array (matched by `parent_id`) instead — never add it as a top-level card, mirroring the read-endpoint invariant that child rows are only ever embedded, rendered inside that parent's `UnlockTree`. A parent's own `onFeatureUpdate` to `status: 'SPLIT'` may arrive before, after, or interleaved with its children's `onFeatureInsert`s (Realtime gives no cross-row ordering guarantee); render whatever subset of `children` has arrived so far rather than waiting for a complete set. A status change that drops a card out of the current view's filter (e.g. `ARCHIVED`) removes it from that view's list; it does not need to appear in a tab that isn't currently mounted/fetched.
+Implement `frontend/src/app_shell.tsx`. It imports the frozen `./styles.css` once for the whole
+application.
 
-## Non-goal
-No polling loop for feature list freshness — Realtime (`onFeatureInsert`/`onFeatureUpdate`) is the only live-update path; `getFeatures` is called on mount/filter-change/pagination only.
+<responsibility>
+Fetch the board from the live backend, render it in the frozen layout, and keep it current as the pipeline moves.
+</responsibility>
 
-## Design guide (frozen — enforced every compile)
-<include>prompts/frontend/design_guide.md</include>
+<non_responsibilities>
+This module DOES NOT call `fetch` or Supabase directly; every request and subscription goes through `api_client`.
+This module DOES NOT render a card's internals, the chyron's cycling, the preview embed, or a dialog's fields — those components own themselves.
+This module DOES NOT ship a mock or fixture mode; the board is read live from the backend.
+This module DOES NOT validate a pitch; `SubmitModal` owns field rules and the backend owns the verdict.
+This module DOES NOT resolve or validate the preview URL; `api_client` owns configuration and the host allowlist.
+</non_responsibilities>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>frontend/src/api_client.ts</include>
-<include>frontend/src/contracts.ts</include>
-<include>frontend/src/components/cards.tsx</include>
-<include>frontend/src/components/broadcast.tsx</include>
-<include>frontend/src/components/sandbox.tsx</include>
-<include>frontend/src/components/submit_modal.tsx</include>
-<include>frontend/src/components/my_pitches_modal.tsx</include>
+<vocabulary>
+**View** — one of the four tabs: `pipeline`, `shipped`, `holding`, `vault`. Each is a different question about the same board, answered by the same endpoint.
+**Live** — the board follows the pipeline without a reload, because the daemon's inserts and the vote counter's updates both arrive over Realtime.
+**Pitch Coin** — one unit of the daily submission allowance, held as a client-side counter. The backend's `429` is the only real limit.
+Active: of a tab, the one view currently being fetched and rendered. It carries `is-active` and `aria-current`; exactly one tab is active at any moment.
+Successful: of a pitch, an `onPitch` that resolved `ok`, meaning the backend returned `202` and the pitch is queued in Redis. It is not yet screened, and it is not yet on the board.
+</vocabulary>
+
+<capabilities>
+- MAY hold board state, the active view/sort/filters, vote-in-flight state, the voted-id set, the coin balance, dialog open state, and the toast.
+- MAY call `api_client` functions and subscribe through it.
+- MUST NOT call `fetch`, construct a Supabase client, or read `import.meta.env`.
+- MUST NOT add a hex value, font, radius, shadow, or animation — compose only classes from the design guide's closed set.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Wrap everything in a single `div.app` and keep the frozen skeleton in order — `Broadcast`, then `header.masthead`, then `div.layout` holding the feed column and the `SandboxPanel`. The responsive collapses at 960px and 560px are already in the stylesheet and MUST NOT be reimplemented inline.
+R2 (MUST): Render the masthead brand as `upvote·dev` with the middle dot in `brand-dot`, and the tagline `You wish it. Agents ship it.` These are the product's name and promise, not placeholder copy for the compiler to replace.
+R3 (MUST): Render `masthead-actions` as the coin chip, then `🔒 My pitches` with a `pitch-count` badge when unresolved pitches exist, then `🔥 Pitch a feature`. The two controls are a matched pair and carry **both** of their classes — `btn-ghost btn-mypitches` and `btn-primary btn-pitch`. `btn-mypitches` on its own sets only flex alignment, so omitting `btn-ghost` renders the control as bare text with no border, padding, or radius beside a fully-styled pill.
+R4 (MUST): Render the four tabs — `⚡ Up Next Pipeline`, `🏆 Shipped`, `⏸ Holding Pattern`, `🗄️ The Vault` — mapping to `pipeline`, `shipped`, `holding`, `vault`, with the active one carrying `is-active` and `aria-current`, and a `tab-count` on Holding when it is non-empty. A held feature is the one thing on this board that looks like a loss, so the count is what stops it being quietly buried.
+R5 (MUST): On the pipeline tab render the `feed-controls` sort toggle (`🔥 Highest Upvotes` → `top`, `✨ Newest` → `new`). No sort other than `top` and `new` exists server-side and inventing one earns a `400`.
+R5a (MUST): Render `filter-chips` as a **sibling of `feed-controls`, on its own row** — `All`, then one chip per pipeline stage — and MUST NOT nest it inside `feed-controls`. `feed-controls` is a flex row, so nesting crushes the sort toggle and six stage chips onto one line, which is the cramped layout this rule exists to prevent.
+R5b (MUST): Let the chips **multi-select**: each toggles independently, `All` clears the set and is active only while the set is empty, and an empty set means no filter. Stage filtering asks "show me these kinds", and one-at-a-time answers a narrower question than anyone asked.
+R6 (MUST): Send the whole selected set as the `status` query parameter rather than filtering the fetched page in the browser. Client-side filtering of one page silently hides matching rows that sit on the next page, which reads as the filter being broken.
+R7 (MUST): On the vault tab render the `vault-search` input and send its value as `q`, debounced, so the endpoint does the narrowing. A search box that only filters what is already loaded is worse than no search box.
+R8 (MUST): Fetch through `api_client.listFeatures` on mount and whenever the view, sort, filters, or query change, and render the card matching the view — `FeatureCard` on pipeline, `ShippedCard` on shipped, `HoldingCard` on holding, `VaultCard` on vault. The board is read live; there is no fixture path.
+R9 (MUST): Render three distinct states — loading, empty, and error — using `feed-status`. An error MUST NOT render as an empty board: "no features in this stage right now" and "we could not reach the server" are opposite messages, and showing the first when the second is true makes a broken deploy look like a quiet community.
+R10 (MUST): Show the backend's `message` verbatim on an error, with a retry control. The copy is written to be displayed.
+R11 (MUST): Render the section blurb for the shipped, holding, and vault tabs from the design guide's copy deck. Those three tabs each need a sentence of framing — especially holding, where the blurb is what stops a paused idea reading as a rejected one.
+R12 (MUST): Subscribe once through `api_client.subscribe` and dispose on unmount using the returned function. Every component subscribing for itself multiplies channels and leaks them.
+R13 (MUST): On `onFeatureUpdate`, merge the incoming row into the matching feature in state rather than replacing it. Realtime sends the changed Postgres row, not the joined shape the endpoint builds, so `children` is absent on an update — replacing wholesale would blank a split parent's children (api_client R19).
+R14 (MUST): On `onFeatureInsert`, branch on `parent_id`: a null parent is a new top-level card; a set parent means a split child, which is merged into that parent's `children` rather than added to the feed. The read endpoint returns root rows only, and a child appearing as a sibling of its parent contradicts the board it came from.
+R15 (MUST): Ignore a Realtime row that does not belong to the current view — an `ARCHIVED` update while the pipeline tab is open leaves the pipeline alone. The subscription is board-wide but each tab asks a narrower question.
+R16 (MUST): Send a vote through `api_client.upvote`, track the in-flight id so the card can disable its control, and reconcile the count from the response. On `409 already_voted`, mark the feature voted rather than showing an error — the visitor's intent is already recorded, so an error would be a lie.
+R17 (MUST): Keep a set of ids this visitor has voted for, seeded from `viewer_has_voted` on every read, and pass it to every card, so a returning visitor is not invited to click something that will answer `409`.
+R18 (MUST): Celebrate a child crossing its `unlock_threshold` with the `🔓 Unlocked: "{title}"` toast. The unlock is the reward the split was designed to produce and it passes silently without this.
+R19 (MUST): Hold the coin balance as a **client-side counter** — seed it at five, decrement on a successful pitch, and refill two minutes after it empties, announcing the refill with a toast. No endpoint reports a remaining count; this is a demo economy tuned so a judge watching for five minutes sees the refill happen.
+R20 (MUST): Disable the pitch control at zero coins and replace its label with `🪙 Coins refresh in {m:ss}`, ticking every second. A disabled button with no explanation reads as a broken app.
+R21 (MUST): On a `429` set the local balance to zero and pass `resets_at` to the dialog. The local number was optimistic; the server's answer replaces it rather than arguing with it.
+R22 (MUST): Own both dialogs' open state, pass `api_client.createFeature` as the pitch seam, and load `api_client.getMyPitches` when the My Pitches dialog opens.
+R23 (MUST): On a successful pitch show the screening toast and add a **pending entry** built from the returned `feature_id` and the title the dialog passes back, so the wait is legible in the My Pitches dialog.
+R24 (MUST NOT): Insert the new pitch into the feed, or render any pending entry inline with the board. It is unscreened until the daemon says otherwise, and putting it on the public board is the exact failure screening exists to prevent.
+R25 (MUST): Remove a pending entry when a Realtime insert arrives whose `feature_id` matches it, and celebrate the arrival. That moment — pitch, wait, appear — is the loop the product is selling.
+R26 (MUST): Raise the sandbox pulse when the chyron reports its success phase, and clear it when the panel reports a refresh. That is the chain that turns "an agent shipped something" into a visitor actually looking at it.
+R27 (MUST): Render at most one toast at a time in a `toast` with `role="status"`, auto-dismissing after a few seconds, and clear any pending timer on replacement so a fast sequence cannot dismiss the newest message early.
+R28 (MUST NOT): Block first render on the anonymous session. Board reads are anonymous, so the feed must paint before any auth work completes — the session is only needed when someone votes.
+R29 (MUST): Give the feed a landmark role and an accessible name, and announce loading and error states to assistive technology rather than only styling them.
+R30 (MUST NOT): Introduce a CSS framework, UI kit, or state-management library. Component state and context are sufficient at this size, and the design guide forbids the first two outright.
+R31 (MUST): Handle a Vault reboot by moving the request to `VOTING` in local state and confirming it with the `⚡ Rebooted! A fresh 30-day VOTING window has started.` toast. The row leaving the tab the visitor is looking at is not by itself legible as success, so the toast is the confirmation. No endpoint persists this yet (US-16) — the handler MUST NOT call `api_client` for it, and MUST NOT be written to look as though the change survives a reload.
+</contract_rules>
+
+<pdd>
+**The vault reboot is client-side only (US-16).** `VaultCard` renders the control and this shell
+moves the row to `VOTING` locally and toasts, but no endpoint persists it — a reload puts the
+feature back in the vault. That split is deliberate and documented in the story: the UI half is
+what stops the Vault tab reading as a dead end, and the write lands with US-07, where archiving and
+voting windows acquire real rules. Do not present it as durable.
+
+**Pagination is not wired.** `listFeatures` returns `next_cursor` and this shell ignores it, so each
+tab shows the first page. The cursor is already threaded through the client, so it is a UI change
+only.
+
+**Realtime carries no auth context.** Postgres row events do not know who is watching, so
+`viewer_has_voted` never arrives over the wire — the visitor's own vote state lives in the set from
+R17 and is seeded by the REST read. A vote cast in another tab will not light up here until a
+refetch.
+
+**The chyron is scripted.** `Broadcast` cycles its own default array until US-11 feeds it
+`broadcast_events` over Realtime. The seam is the `messages` prop, so that change touches no markup
+here.
+</pdd>
 
 <dependencies>
 <include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+<include optional>frontend/src/api_client.ts</include>
+<include optional>frontend/src/components/broadcast.tsx</include>
+<include optional>frontend/src/components/feature_card.tsx</include>
+<include optional>frontend/src/components/sandbox_panel.tsx</include>
+<include optional>frontend/src/components/submit_modal.tsx</include>
+<include optional>frontend/src/components/my_pitches_modal.tsx</include>
 </dependencies>
+
+<coverage>
+R1: docs/user_stories/story__browse_the_pipeline_board.md
+R2: docs/user_stories/story__browse_the_pipeline_board.md
+R3: docs/user_stories/story__pitch_a_feature.md
+R4: docs/user_stories/story__browse_the_pipeline_board.md
+R5: docs/user_stories/story__browse_the_pipeline_board.md
+R5a: frontend/src/app_shell.test.tsx
+R5b: frontend/src/app_shell.test.tsx
+R6: docs/user_stories/story__browse_the_pipeline_board.md
+R7: docs/user_stories/story__browse_the_pipeline_board.md
+R8: docs/user_stories/story__browse_the_pipeline_board.md
+R9: docs/user_stories/story__browse_the_pipeline_board.md
+R10: docs/user_stories/story__browse_the_pipeline_board.md
+R11: docs/user_stories/story__browse_the_pipeline_board.md
+R12: frontend/src/app_shell.test.tsx
+R13: docs/user_stories/story__browse_the_pipeline_board.md
+R14: docs/user_stories/story__browse_the_pipeline_board.md
+R15: frontend/src/app_shell.test.tsx
+R16: docs/user_stories/story__upvote_a_feature.md
+R17: docs/user_stories/story__upvote_a_feature.md
+R18: docs/user_stories/story__prioritise_an_overwhelming_backlog.md
+R19: docs/user_stories/story__pitch_a_feature.md
+R20: docs/user_stories/story__pitch_a_feature.md
+R21: docs/user_stories/story__pitch_a_feature.md
+R22: docs/user_stories/story__track_my_pitches.md
+R23: docs/user_stories/story__track_my_pitches.md
+R24: docs/user_stories/story__screen_incoming_pitches.md
+R25: docs/user_stories/story__track_my_pitches.md
+R26: docs/user_stories/story__preview_the_shipped_feature.md
+R27: TODO — add a test asserting one toast at a time and timer replacement
+R28: docs/user_stories/story__browse_the_pipeline_board.md
+R29: frontend/src/app_shell.test.tsx
+R30: TODO — add a check asserting no UI or state library is imported
+R31: docs/user_stories/story__reboot_an_archived_request.md
+</coverage>

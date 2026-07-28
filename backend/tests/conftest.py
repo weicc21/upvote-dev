@@ -43,11 +43,20 @@ class FakeQuery:
         return self
 
     def eq(self, col: str, val: Any) -> FakeQuery:
-        self._filters[col] = val
+        self._filters[col] = ("eq", val)
         return self
 
     def in_(self, col: str, vals: Any) -> FakeQuery:
-        self._filters[col] = vals
+        self._filters[col] = ("in", list(vals))
+        return self
+
+    def is_(self, col: str, val: Any) -> FakeQuery:
+        # PostgREST spells SQL NULL as the string "null"
+        self._filters[col] = ("is", None if str(val).lower() == "null" else val)
+        return self
+
+    def neq(self, col: str, val: Any) -> FakeQuery:
+        self._filters[col] = ("neq", val)
         return self
 
     def order(self, *_a: Any, **_k: Any) -> FakeQuery:
@@ -82,10 +91,32 @@ class FakeQuery:
             if exc is not None:
                 raise exc
             return type("Resp", (), {"data": [self._payload]})()
-        rows = self._store.rows.get(self._table, [])
+        rows = self._apply_filters(self._store.rows.get(self._table, []))
         if getattr(self, "_single", False):
             return type("Resp", (), {"data": rows[0] if rows else None})()
         return type("Resp", (), {"data": list(rows)})()
+
+
+    def _apply_filters(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply the recorded eq/in_/is_/neq filters.
+
+        Without this a root-rows-only query returns split children too, and the
+        test passes while the product is broken.
+        """
+        out = list(rows)
+        for col, spec in self._filters.items():
+            if not isinstance(spec, tuple):
+                spec = ("eq", spec)
+            op, val = spec
+            if op == "eq":
+                out = [r for r in out if r.get(col) == val]
+            elif op == "in":
+                out = [r for r in out if r.get(col) in val]
+            elif op == "is":
+                out = [r for r in out if r.get(col) is val]
+            elif op == "neq":
+                out = [r for r in out if r.get(col) != val]
+        return out
 
 
 class FakeSupabase:

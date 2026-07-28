@@ -1,27 +1,93 @@
-# Module: my_pitches_modal
-Compile unit for the Forum Frontend.
-Generates: `frontend/src/components/my_pitches_modal.tsx` (current hand-authored code is the reference output)
+<pdd-reason>The author's private tracking view. A pitch is invisible to everyone else until it clears screening, so without this dialog the act of pitching ends in silence — and silence reads as the idea being thrown away.</pdd-reason>
 
-## Behavior
-- Author-only dialog opened from the masthead "🔒 My pitches" control; labeled "Only you can see these."
-- `api_client.getMyFeatures` (`GET /api/features/mine`) returns two lists; this is the **one place both are shown together**, satisfying "list every pitch across all outcomes" from a single dialog rather than sending the author hunting across public tabs:
-  - **`pending`** (unverified, private — detailed below): `screening` and terminal `rejected`/`merged` states.
-  - **`features`** (the author's own rows that already exist in Postgres — public elsewhere, but surfaced here too for one-stop tracking): render one compact, read-only row per entry with title + its current stage pill (`VOTING` "🗳️ In voting", `CONSOLIDATING`/`IN_SPRINT` "🛠️ Being built", `SPLIT` "🚀 Split into parts", `POSTPONED_CONFLICT` "⏸ On hold", `COMPILED` "🎉 Shipped" + `shipped_version`, `ARCHIVED` "🗄️ Archived") and current `upvotes` — no click-through or action buttons, just status; the public board (already live-updating per `app_shell`) is where the author interacts with it.
-  - Sort both lists newest-first; pending above features (an author cares most about what's still unresolved).
-- Within `pending`: `screening` state shows the pulsing "🛡️ Guardagent is screening your pitch..." row; `rejected` shows reason-mapped copy, one line per `reason` category (never a generic fallback) — `security` → "Your pitch didn't clear screening — rephrase and try again."; `off_topic` → "Great idea, but it's outside what this app is about — check the Sandbox to see what we're building."; `unclear` → "Your title and description seemed to describe different things — try again with them lined up."; `already_shipped` → "Looks like this already shipped in {shipped_version} — check it out in the Sandbox!" (interpolate `shipped_version`) — each with a Dismiss action.
-- `merged` state (a distinct outcome from `rejected` — this is a win, not a drop) shows "🔗 Great minds! Your idea joined forces with '{merged_into_title}'" (interpolate `merged_into_title`); the row is clickable through to that feature (`merged_into_feature_id`) in the public board, plus a Dismiss action.
-- `rejected` and `merged` entries also vanish automatically when their 72h TTL lapses server-side — treat a disappeared entry as dismissed, not an error.
-- Promotion: when a pending pitch's `feature_requests` INSERT arrives via Realtime (matched by `feature_id`), remove it here and celebrate as it enters the public feed. This never fires for a `merged` entry (its own `feature_id` never gets a row) — that outcome is delivered via the `merged` state above instead.
-- Friendly empty state inviting a first pitch. **Never render any of this inline with the public feed.**
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"MyPitchesModal","signature":"function MyPitchesModal(props: MyPitchesModalProps): JSX.Element | null","returns":"the author-only dialog; null when open is false"},
+  {"name":"MyPitchesModalProps","signature":"type MyPitchesModalProps = { open: boolean; onClose: () => void; pending: PendingPitch[]; features: Feature[]; loading?: boolean; error?: string | null; onDismiss: (feature_id: string) => void; onRetry?: () => void }","returns":"the component contract"}
+]}}
+</pdd-interface>
 
-## Design guide (frozen — enforced every compile)
-<include>prompts/frontend/design_guide.md</include>
+<pdd-dependency>prompts/frontend/api_client_typescript.prompt</pdd-dependency>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>frontend/src/api_client.ts</include>
-<include>frontend/src/contracts.ts</include>
+Implement `frontend/src/components/my_pitches_modal.tsx`. `PendingPitch` and `Feature` are imported
+as types from `../api_client`; there is no `contracts.ts`. The shell calls
+`api_client.getMyPitches` and passes both lists down.
+
+<responsibility>
+Show one author every pitch they have made — still screening, dropped, merged, or live — in a single private dialog.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT fetch; the shell owns the read and passes both lists in, so this dialog unit-tests without a network.
+This module DOES NOT render anywhere near the public feed. These entries are unverified content and putting them inline with the board is the exact failure screening exists to prevent.
+This module DOES NOT let the author edit, retract, or re-submit a pitch — the pipeline owns a pitch once it is queued.
+This module DOES NOT import `styles.css`; the shell imports it once for the whole app.
+</non_responsibilities>
+
+<vocabulary>
+**Pending** — a pitch that exists only in Redis under a TTL: still `screening`, or terminally `rejected` or `merged`. It has a `feature_id` but no Postgres row, and it disappears on its own when the TTL lapses.
+**Merged** — not a rejection. The author's idea joined an existing feature and their vote went with it; the copy celebrates rather than apologises.
+Duplicate: a pitch the PM agent judged to be the same idea as an existing feature. It is merged into that feature rather than dropped, which is why its outcome is `merged` and not `rejected`.
+**Invisible rejection** — the public board never shows that a pitch was dropped. This dialog is the only place the author learns it, and only the author sees it.
+</vocabulary>
+
+<capabilities>
+- MAY sort and group the lists it is handed.
+- MUST NOT call `fetch`, `api_client`, or Supabase.
+- MUST NOT add a hex value, font, radius, or animation — compose only `modal-backdrop`, `modal`, `modal-head`, `modal-close`, `modal-hint`, `pitches-list`, `pitches-empty`, `pending-card`, `is-rejected`, `pending-copy`, `pending-status`, `shield`, `btn-ghost`, `btn-dismiss`, `pill` and its stage variants.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Render the dialog titled `My pitches` with the hint `🔒 Only you can see these. A pitch joins the public feed once Guardagent clears it.` The lock is the point: an author needs to know this view is theirs alone before it shows them a rejection.
+R2 (MUST): Show `pending` above `features`, each sorted newest first. An author cares most about what is still unresolved.
+R3 (MUST): Render a `screening` entry with the pulsing `shield` and `🛡️ Guardagent is screening your pitch...`, and no dismiss control — there is nothing to dismiss yet.
+R4 (MUST): Map every rejection `reason` to its own line and never fall back to a generic message: `security` → "Your pitch didn't clear screening — rephrase and try again."; `off_topic` → "Great idea, but it's outside what this app is about — check the Sandbox to see what we're building."; `unclear` → "Your title and description seemed to describe different things — try again with them lined up."; `already_shipped` → "Looks like this already shipped in {shipped_version} — check it out in the Sandbox!" A generic "rejected" teaches the author nothing and guarantees they pitch the same thing again.
+R5 (MUST NOT): Show the screener's raw verdict, model output, confidence, or internal detail. The author gets the actionable sentence, not the machine's reasoning.
+R6 (MUST): Render a `merged` entry as a win — `🔗 Great minds! Your idea joined forces with "{merged_into_title}"` — visually distinct from a rejection, and MUST NOT mark it `is-rejected`. Losing a duplicate to a stronger feature is the system working, and dressing it as a failure punishes the behaviour the product wants.
+R7 (MUST): Give `rejected` and `merged` entries a Dismiss control calling `onDismiss` with the entry's `feature_id`. A terminal entry the author cannot clear turns the tray into a list of old disappointments.
+R8 (MUST): Render each of the author's existing `features` as one compact read-only row — title, current stage pill, and `upvotes` — with no vote button and no click-through action. The public board is where an author interacts with a live feature; this is a status list.
+R9 (MUST): Render a friendly empty state inviting a first pitch when both lists are empty, using `pitches-empty`.
+R10 (MUST): Render distinct loading and error states, showing the error message with a retry control when `onRetry` is supplied. An empty tray and an unreachable server are opposite facts, and showing the first when the second is true tells the author their pitch vanished.
+R11 (MUST): Use `role="dialog"` with `aria-modal="true"`, labelled by its own heading, and close on the ✕ control, on backdrop click, and on `Escape`.
+R12 (MUST): Move focus into the dialog on open and return it to the opener on close.
+R13 (MUST NOT): Render `feature_id` or any other id as visible text. It is passed to `onDismiss`, never printed.
+R14 (MUST): Treat an entry that has disappeared between reads as dismissed rather than as an error — `rejected` and `merged` entries lapse with their 72-hour TTL, and a pitch that clears screening is removed when its Realtime insert arrives.
+</contract_rules>
+
+<pdd>
+This dialog is the whole of US-06's UI. It replaces the inline pending tray an earlier draft of the
+shell rendered above the feed — that put unscreened titles one CSS mistake away from the public
+board, and the mock's masthead-button-plus-dialog is both safer and less cluttered.
+
+`merged` is deliberately a peer of `rejected` in `PendingPitch.state` rather than a rejection
+reason. The two outcomes differ in what the author should feel and in whether a public row exists
+to point at, and collapsing them would lose both distinctions.
+
+Promotion out of this dialog is driven by the shell: when the Realtime insert for a pending
+`feature_id` arrives, the shell drops the entry and celebrates. That never fires for a `merged`
+entry, whose `feature_id` never becomes a row — which is why R6's copy has to carry the outcome
+itself.
+</pdd>
 
 <dependencies>
 <include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+<include optional>frontend/src/api_client.ts</include>
 </dependencies>
+
+<coverage>
+R1: docs/user_stories/story__track_my_pitches.md
+R2: docs/user_stories/story__track_my_pitches.md
+R3: docs/user_stories/story__track_my_pitches.md
+R4: docs/user_stories/story__screen_incoming_pitches.md
+R5: docs/user_stories/story__screen_incoming_pitches.md
+R6: docs/user_stories/story__dedup_against_existing_features.md
+R7: docs/user_stories/story__track_my_pitches.md
+R8: docs/user_stories/story__track_my_pitches.md
+R9: docs/user_stories/story__track_my_pitches.md
+R10: frontend/src/components/my_pitches_modal.test.tsx
+R11: frontend/src/components/my_pitches_modal.test.tsx
+R12: TODO — add a test asserting focus moves in and returns
+R13: frontend/src/components/my_pitches_modal.test.tsx
+R14: docs/user_stories/story__track_my_pitches.md
+</coverage>

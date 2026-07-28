@@ -1,23 +1,110 @@
-# Module: submit_modal
-Compile unit for the Forum Frontend.
-Generates: `frontend/src/components/submit_modal.tsx` (current hand-authored code is the reference output)
+<pdd-reason>The pitch form: the one surface where a community member turns an idea into a queued feature request. It closes on 202 and hands off — it never waits for screening.</pdd-reason>
 
-## Behavior
-- Field A: Feature Title — max 60 chars, single line, live character countdown (warns when low).
-- Field B: Functional Scope — max 300 chars, multi-line, live countdown; reject under 30 chars with copy nudging precise, implementation-first behaviors over sweeping epics.
-- Shows the coin cost: "Costs 1 🪙 · N left today"; submit button "🔥 Pitch it (1 🪙)".
-- On submit: call `api_client.createFeature`; on `202`, close and let the shell show the screening toast + pending entry (author-only). On `429`: "You've hit 5 pitches this hour — take a breather" style copy and disabled submit.
-- Validation errors render inline, friendly, verbatim-displayable; never raw error detail.
-- Dialog a11y: `role="dialog"`, `aria-modal`, labelled title, backdrop click + ✕ to close, autofocus on Field A.
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"SubmitModal","signature":"function SubmitModal(props: SubmitModalProps): JSX.Element | null","returns":"the pitch dialog; null when open is false"},
+  {"name":"SubmitModalProps","signature":"type SubmitModalProps = { open: boolean; onClose: () => void; onPitch: (input: {title: string; description: string}) => Promise<ApiResult<{feature_id: string; state: 'screening'}>>; onPitched: (feature_id: string, title: string) => void; coinsRemaining: number; resetsAt: string | null }","returns":"the component contract"}
+]}}
+</pdd-interface>
 
-## Design guide (frozen — enforced every compile)
-<include>prompts/frontend/design_guide.md</include>
+<pdd-dependency>prompts/frontend/api_client_typescript.prompt</pdd-dependency>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>frontend/src/api_client.ts</include>
-<include>frontend/src/contracts.ts</include>
+Implement `frontend/src/components/submit_modal.tsx`. `ApiResult` is imported as a type from
+`../api_client`.
+
+<responsibility>
+Collect a valid title and description, spend one Pitch Coin to submit them, and report the outcome in copy the author can act on.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT perform HTTP; it calls the injected `onPitch` seam so it is testable against a stub.
+This module DOES NOT insert the new pitch into the public feed — a pitch is invisible until it survives screening (US-01).
+This module DOES NOT render the author's pending tray or any screening outcome; that is the My Pitches dialog (US-06).
+This module DOES NOT own the coin balance; it displays what it is given and reports a `429`.
+This module DOES NOT import `styles.css`; the shell imports it once for the whole app.
+</non_responsibilities>
+
+<vocabulary>
+**Pitch Coin** — one unit of the author's daily submission allowance. A submit that reaches the backend spends one; a client-side validation failure spends none.
+**Seam** — the injected `onPitch` prop, the single point this component touches the outside world and the single thing a unit test replaces.
+Duplicate: two requests produced by one intent, typically a double click. It spends two coins and queues the same idea twice, so the control locks for the duration of the request.
+Invalid: a title or scope outside the bounds in R1. The control is marked `aria-invalid` and the reason is stated in copy; the backend re-checks regardless.
+**Verbatim copy** — `message` from the backend is written to be shown unchanged. It is displayed as-is, never parsed, prefixed, or rewritten.
+</vocabulary>
+
+<capabilities>
+- MAY hold form state, validation state, and in-flight state locally.
+- MAY call `onPitch`, `onPitched`, and `onClose`.
+- MUST NOT call `fetch`, construct a Supabase client, or import an HTTP module.
+- MUST NOT add a hex value, font, radius, or animation — compose only `modal-backdrop`, `modal`, `modal-head`, `modal-close`, `modal-hint`, `modal-actions`, `field`, `field-label`, `char-count`, `is-low`, `form-error`, `coin-cost`, `btn-primary`, `btn-ghost`.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Field A is the feature title — single line, 1–60 characters. Field B is the functional scope — a 4-row textarea, 30–300 characters. These bounds are the frozen request schema in `openapi.yaml`, mirrored here and never invented or widened.
+R2 (MUST): Show the **remaining** characters for each field in a `char-count` inside its `field-label`, switching to `is-low` as the limit nears — within 10 for the title, within 30 for the scope. A count that goes down is what makes a 300-character ceiling survivable while typing.
+R3 (MUST): Cap each control with `maxLength` so the ceiling is enforced by the input rather than by an error message after the fact, and state the floor in `form-error` copy naming the field and the bound when a submit is blocked. A disabled button with no stated reason MUST NOT be the only feedback — the author cannot fix what they cannot see.
+R4 (MUST): Treat the 30-character minimum on scope as the quality gate it is, with copy nudging toward one precise, implementation-ready behaviour rather than a sweeping epic. This is the text the screener, the dedup agent, and the architect all reason over, so vague input degrades every stage downstream.
+R5 (MUST NOT): Reflow, autocorrect, or otherwise rewrite what the author typed. Surrounding whitespace may be trimmed; nothing else changes. The backend strips control characters and rejects markup — the client's job is to send what was typed.
+R6 (MUST): On submit call `onPitch` and disable the submit control for the duration. A double click MUST NOT produce two requests — that spends two coins for one idea and queues a duplicate.
+R7 (MUST): On success clear the form, call `onPitched` with the returned `feature_id` and the title the author typed, then close. The `202` body carries no title, so the shell cannot show a meaningful pending entry unless this component passes it up.
+R8 (MUST NOT): Clear the form on any failure. A rejected pitch keeps its text so the author can edit and retry rather than retype from nothing.
+R9 (MUST): Render the backend's `message` verbatim in `form-error` on a `400`, keeping the dialog open with the fields intact. Client-side validation is a convenience, not the authority — the server's copy wins when the two disagree.
+R10 (MUST): On `429` show the out-of-coins state with a live countdown derived from `resetsAt`, and disable submit. It is a scheduled limit, not an error: the framing is "back tomorrow", never a red failure.
+R11 (MUST NOT): Display a raw status code, stack, JSON payload, or network-error string. An unrecognised failure gets one friendly line and a retry affordance.
+R12 (MUST): Show the cost and the remaining balance in a `coin-cost` line inside `modal-actions`, and label the submit control with the cost. The author should never have to guess what pressing it spends.
+R13 (MUST): Disable the submit control when `coinsRemaining` is zero and show the countdown to `resetsAt` in its place, before any request is attempted. Sending a pitch the client already knows will be refused wastes the author's time on a round-trip and surfaces a `429` where a calm "back tomorrow" belongs.
+R14 (MUST NOT): Treat the passed-in balance as authoritative — it is presentation only, stale across tabs and reloads, so a `429` is always possible on a balance the UI shows as positive.
+R15 (MUST): Use `role="dialog"` with `aria-modal="true"`, labelled by the dialog's own heading.
+R16 (MUST): Move focus to the title field on open, trap focus inside the dialog while open, and return focus to the element that opened it on close.
+R17 (MUST): Close on the ✕ control, on `Cancel`, on backdrop click, and on `Escape` — all four, so the dialog is never a trap for keyboard or pointer. A click inside the dialog MUST NOT bubble to the backdrop and close it.
+R18 (MUST): Associate every inline error with its field via `aria-describedby`, mark the field `aria-invalid`, and announce submission failures in a live region. An error only a sighted user can perceive fails the author who most needs it.
+R19 (MUST NOT): Close on backdrop click or `Escape` while a submit is in flight — the coin is already spent and the author would lose the outcome.
+R20 (MUST): Use the existing modal-pop animation and honour `prefers-reduced-motion`.
+R21 (MUST NOT): Add a CSS framework, UI kit, or focus-trap dependency — the focus management in R16 is written by hand against the existing primitives.
+R22 (MUST): Use the design guide's copy deck for this dialog verbatim — the title, the hint about the PM Agent merging duplicates, both field labels, both placeholders, the cost line, and the two action labels. The voice is part of the frozen identity, not filler for the compiler to improve.
+</contract_rules>
+
+<pdd>
+The backend call arrives as the injected `onPitch` prop rather than an import so this component
+compiles and unit-tests standalone; the shell wires `api_client.createFeature` into it.
+
+`resetsAt` formatting is left to the implementation — no relative-time helper is specified and a
+date library would violate R21's spirit, so a hand-rolled minutes/seconds countdown is expected,
+matching the masthead's.
+
+The pitch does not appear on the board when it is accepted, and that is correct: it goes to Redis,
+gets screened, deduped, and shaped, and reaches the feed only if it survives. The My Pitches dialog
+shows it in the meantime, which is why R7 passes the title up rather than dropping it.
+</pdd>
 
 <dependencies>
 <include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+<include optional>frontend/src/api_client.ts</include>
+<include select="lines:33-66">prompts/shared/openapi.yaml</include>
 </dependencies>
+
+<coverage>
+R1: docs/user_stories/story__pitch_a_feature.md
+R2: frontend/src/components/submit_modal.test.tsx
+R3: docs/user_stories/story__pitch_a_feature.md
+R4: frontend/src/components/submit_modal.test.tsx
+R5: frontend/src/components/submit_modal.test.tsx
+R6: docs/user_stories/story__pitch_a_feature.md
+R7: docs/user_stories/story__track_my_pitches.md
+R8: frontend/src/components/submit_modal.test.tsx
+R9: docs/user_stories/story__pitch_a_feature.md
+R10: docs/user_stories/story__pitch_a_feature.md
+R11: frontend/src/components/submit_modal.test.tsx
+R12: docs/user_stories/story__pitch_a_feature.md
+R13: docs/user_stories/story__pitch_a_feature.md
+R14: docs/user_stories/story__pitch_a_feature.md
+R15: frontend/src/components/submit_modal.test.tsx
+R16: TODO — add a test asserting focus moves in, traps, and returns
+R17: frontend/src/components/submit_modal.test.tsx
+R18: TODO — add a test asserting errors are associated and announced
+R19: frontend/src/components/submit_modal.test.tsx
+R20: TODO — add a test asserting reduced-motion disables the pop
+R21: TODO — add a check asserting no UI library is imported
+R22: docs/user_stories/story__pitch_a_feature.md
+</coverage>

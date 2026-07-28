@@ -1,42 +1,116 @@
-# Module: api_client
-Compile unit for the Forum Frontend.
-Generates: `frontend/src/api_client.ts` (new module — replaces the mock data layer `data.ts` when the real backend lands)
+<pdd-reason>The single seam between the forum and its backend. Every HTTP call, the Realtime subscription, the wire types, and the anonymous session that makes "no signup" true all live here, so no component ever holds a URL or a token.</pdd-reason>
 
-## Role
-The frontend's single seam to the backend: every HTTP call and Realtime subscription lives here, so swapping mock ↔ live is a one-module change.
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"Status","signature":"type Status = 'VOTING'|'CONSOLIDATING'|'IN_SPRINT'|'SPLIT'|'COMPILED'|'POSTPONED_CONFLICT'|'ARCHIVED'","returns":"canonical status union"},
+  {"name":"View","signature":"type View = 'pipeline'|'shipped'|'holding'|'vault'","returns":"board view union"},
+  {"name":"Sort","signature":"type Sort = 'top'|'new'","returns":"board sort union"},
+  {"name":"Feature","signature":"interface Feature","returns":"the openapi Feature schema in snake_case, including children: Feature[]"},
+  {"name":"PendingPitch","signature":"interface PendingPitch","returns":"the openapi PendingPitch schema in snake_case"},
+  {"name":"ApiResult","signature":"type ApiResult<T> = { ok: true; data: T } | { ok: false; status: number; code: string; message: string; resets_at?: string }","returns":"the normalised outcome every call returns"},
+  {"name":"listFeatures","signature":"async function listFeatures(params: {view: View; sort?: Sort; q?: string; status?: Status[]; cursor?: string; limit?: number}): Promise<ApiResult<{features: Feature[]; next_cursor: string | null}>>","returns":"GET /api/features"},
+  {"name":"getFeature","signature":"async function getFeature(id: string): Promise<ApiResult<Feature>>","returns":"GET /api/features/{id}"},
+  {"name":"getMyPitches","signature":"async function getMyPitches(): Promise<ApiResult<{pending: PendingPitch[]; features: Feature[]}>>","returns":"GET /api/features/mine"},
+  {"name":"createFeature","signature":"async function createFeature(input: {title: string; description: string}): Promise<ApiResult<{feature_id: string; state: 'screening'}>>","returns":"POST /api/features"},
+  {"name":"upvote","signature":"async function upvote(id: string): Promise<ApiResult<{feature_id: string; upvotes: number}>>","returns":"POST /api/features/{id}/upvote"},
+  {"name":"subscribe","signature":"function subscribe(handlers: {onFeatureInsert?: (row: Feature) => void; onFeatureUpdate?: (row: Feature) => void}): () => void","returns":"Realtime subscription; returns its own unsubscribe"},
+  {"name":"sandboxUrl","signature":"const sandboxUrl: string | null","returns":"the hosted target app URL for the preview iframe, or null when unset/disallowed"},
+  {"name":"ensureSession","signature":"async function ensureSession(): Promise<string | null>","returns":"the caller's access token, creating an anonymous session on first use"}
+]}}
+</pdd-interface>
 
-## Interface
-- `getFeatures({ view, sort, q, status })` → GET `/api/features`
-- `getFeature(id)` → GET `/api/features/{id}`
-- `getMyFeatures()` → GET `/api/features/mine`
-- `createFeature({ title, description })` → POST `/api/features` (expect `202` + `feature_id`; surface `429` as out-of-coins)
-- `upvote(id)` → POST `/api/features/{id}/upvote` (surface `409` as already-hyped)
-- `reboot(id)` → POST `/api/features/{id}/reboot`
-- `getBroadcast(limit)` → GET `/api/broadcast`
-- `getSandbox()` → GET `/api/sandbox`
-- `subscribe({ onFeatureInsert, onFeatureUpdate, onBroadcastEvent, onDeployment })` — Supabase Realtime on `feature_requests` (INSERT and UPDATE), `broadcast_events`, `deployments`
+Implement `frontend/src/api_client.ts`.
 
-## Behavior
-- **Identity bootstrap (no account setup ceremony)**: on module init, restore a persisted Supabase session if one exists; otherwise call `supabase.auth.signInAnonymously()` once and persist the resulting session (Supabase's own storage, e.g. `localStorage`) so the same anonymous identity survives reloads. This runs silently in the background — no sign-in form, no blocking the shell's first render, no user-visible step. The resulting anonymous JWT **is** a Supabase Auth JWT, so it satisfies `security: supabaseJwt` on writes with no backend changes. A same-tab retry (e.g. the anonymous call fails offline) is fine; never fall back to an unauthenticated write.
-- **`onFeatureUpdate` is what makes upvotes (and every other status/count change) live for viewers who didn't click anything** — subscribe to Postgres UPDATE events on `feature_requests`, not just INSERT: an upvote's atomic `upvotes` increment, a `SPLIT`/`POSTPONED_CONFLICT`/`ARCHIVED`/`COMPILED` status flip, and an `unlock_threshold` progress change all arrive here. Map each row through the same wire→view-model mapper as `onFeatureInsert` before handing it to callers, matched by `id`/`feature_id` so the caller can merge-in-place rather than refetch. A viewer's own click is reconciled locally by `upvote_button`'s response handling; this callback is what keeps *every other* open tab in sync without a manual refresh.
-- **Conforms to `prompts/shared/openapi.yaml`** (the frozen wire contract, snake_case): request/response bodies match its schemas exactly; test against a spec-driven mock server.
-- **Wire → view-model mapping lives here and only here.** The components use view names that differ from wire names; this module owns the translation so neither side drifts:
-  `description` → `scope` · `unlock_threshold` → `needed` · `created_at` → `createdAt` · `shipped_at`/`shipped_version` → `shippedAt`/`shippedVersion` · `merge_count` → `mergeCount` · `ai_explanation` → `aiExplanation` · `postpone_count` → `holdCycle` (with `holdMax` = 2 constant) · `author_handle` → `author` · `viewer_has_voted` → seeds `votedIds` · `merged_into_feature_id`/`merged_into_title` (on `PendingPitch`) → `mergedIntoId`/`mergedIntoTitle`.
-  Supabase Realtime rows arrive in wire shape (raw columns); pass them through the same mapper before they reach components.
-- `429` responses carry `resets_at` — feed it to the coin-refresh countdown instead of the mock's hardcoded window.
-- Base URL + Supabase credentials from Vite env; when absent, export the mock implementation (current `data.ts` behavior) so the app stays standalone.
-- Attach the Supabase Auth JWT (from the identity bootstrap above — anonymous or a real session, whichever exists) to writes; reads are unauthenticated.
-- Never talk to Redis or Postgres directly — HTTP API + Realtime only (manifest boundary rule).
-- Errors return the backend's friendly copy verbatim for direct display; never leak raw payloads.
+<responsibility>
+Turn the frozen HTTP contract into typed functions that never throw, own the wire types, and keep the visitor identified without ever asking them to sign up.
+</responsibility>
 
-## Testing convention
-Unit tests use **Vitest** + **React Testing Library** + **jsdom** (Vite-native; not Jest). This module is the single backend seam, so component modules are tested against a **stubbed `api_client`** (mock each method) or a spec-driven mock server from `openapi.yaml` — never a live backend. Realtime is mocked by invoking the `subscribe` callbacks (`onFeatureInsert`/`onFeatureUpdate`/`onBroadcastEvent`/`onDeployment`) directly. The identity bootstrap is tested against a stubbed Supabase auth client (`signInAnonymously`/session storage mocked) — no unit test triggers a live anonymous sign-in. No unit test hits a live backend or Supabase Realtime.
+<non_responsibilities>
+This module DOES NOT render anything, hold view state, or know what a card is.
+This module DOES NOT talk to Postgres or Redis; the board is served by the backend and the only direct Supabase use is auth and Realtime.
+This module DOES NOT decide policy — it reports what the backend said, and whether a `429` disables a button is the shell's decision.
+This module DOES NOT retry a write, because a retried pitch spends a second coin and queues a duplicate.
+</non_responsibilities>
 
-## Dependencies
-<!-- Real <include> tags: each points at the dependency's generated output (the interface this module imports); resolved by `pdd sync` in dependency order. -->
-<include>prompts/shared/openapi.yaml</include>
-<include>frontend/src/contracts.ts</include>
+<vocabulary>
+**Seam** — this module. Components import it or receive its functions as props; nothing else in the app performs I/O, and a unit test replaces it wholesale (design guide, rule 7).
+**Normalised result** — the `ApiResult` union. Expected failures are *values*, not exceptions, so a caller cannot forget a `429` the way it can forget a `catch`.
+**Identified, not registered** — an anonymous Supabase session is a real, verifiable identity with no signup. It is what makes "no account setup ceremony" literally true (US-01).
+</vocabulary>
+
+<capabilities>
+- MAY call `fetch`, create the Supabase browser client, and open a Realtime channel.
+- MAY read Vite env variables at module scope.
+- MUST NOT import a component or anything under `components/`.
+- MUST NOT write to the DOM or import `styles.css`.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Declare and export `Status`, `View`, `Sort`, `Feature`, and `PendingPitch` here, as the single definition each has in the frontend. There is no `contracts.ts` module and none is coming; a component needing a wire type imports it from here.
+R2 (MUST): Reproduce the `openapi.yaml` schemas in **snake_case**, field for field — `feature_id`, `next_cursor`, `created_at`, `viewer_has_voted`, `merged_into_feature_id`, `ai_explanation`, `extends_title`, `merge_count`. The backend mirrors Postgres column names so REST bodies and Realtime rows share one shape; renaming to camelCase here would force a second mapping on every Realtime payload and guarantee the two drift.
+R3 (MUST): Type `Feature.children` as `Feature[]` and never optional. The backend always sends the key as a list, so a component maps over it directly rather than guarding a field the schema describes as a list.
+R4 (MUST): Every call resolves to `ApiResult` and MUST NOT throw for any HTTP status. A network failure, a timeout, and an unparseable body all resolve to `{ok: false}` with a friendly `message` and a synthetic `code` — callers handle one shape, always.
+R5 (MUST): On a non-2xx take `code` and `message` from the backend's `{"error": {...}}` envelope and pass `message` through untouched. It is written to be displayed verbatim, so rewriting or prefixing it is a defect.
+R6 (MUST): Surface `resets_at` from the `429` on `createFeature` — it is a sibling of `error`, not a field inside it, and the coin countdown reads it.
+R7 (MUST NOT): Retry, queue, or deduplicate a failed write.
+R8 (MUST): Before the first write, ensure a session — reuse a persisted Supabase session, otherwise create an anonymous one (`signInAnonymously`) and let Supabase persist it. This happens silently: no form, no redirect, no blocking of first render.
+R9 (MUST): Attach the access token as `Authorization: Bearer <token>` on writes and on `getMyPitches`. Board reads are anonymous by contract; `getMyPitches` is a read whose response depends on who is asking, so it carries the token too.
+R10 (MUST): In dev mode send an `X-Dev-User` UUID header instead of a bearer token, persisting the generated UUID for the browser profile so a reload is the same person and repeated pitching spends that person's coins.
+R11 (MUST NOT): Log, display, or place an access token in a URL, query string, or error message.
+R12 (MUST): Read the API base URL and Supabase URL / anon key from `import.meta.env`. A hardcoded `localhost` MUST NOT appear in this module.
+R13 (MUST): Send `view`, `sort`, `limit`, and `cursor` with exactly the names `openapi.yaml` freezes, and serialise `status` as a CSV string. `newest`, `page`, and `page_size` are wrong and the backend answers `400`.
+R14 (MUST): Return `next_cursor` to the caller rather than swallowing it. Board paging is keyset, so the cursor is the only way to reach page two; a client that drops it silently truncates the roadmap at 30 rows.
+R15 (MUST): Apply a request timeout and resolve to `{ok: false}` when it fires, so a hung request cannot leave a submit button disabled forever.
+R16 (MUST): Subscribe to **both** INSERT and UPDATE on `feature_requests`, exposing `onFeatureInsert` and `onFeatureUpdate`, and return an unsubscribe function. Every stage change and every vote-count change is an UPDATE, not an INSERT — an INSERT-only subscription produces a board that never moves, which is the single highest-value live behaviour in the product.
+R17 (MUST): Hand Realtime rows to callbacks in wire shape, unmodified. Because of R2 a Realtime row and a REST body are already the same shape, so there is no second mapping to drift.
+R18 (MUST): Reconnect on connection loss and MUST NOT throw into the caller when the channel drops — the board degrades to stale, never to broken.
+R19 (MUST NOT): Assume a Realtime row is complete. Postgres sends the changed row, not the joined shape the REST endpoint builds, so `children` may be absent on an update — the caller merges it into existing state rather than replacing a parent's children with nothing.
+R20 (MUST): Export `sandboxUrl`, read from `import.meta.env.VITE_SANDBOX_URL`. The target app is hosted, not served locally, so the preview is an external URL — and `app_shell` may not read env itself, which is why it is surfaced here alongside every other piece of configuration.
+R21 (MUST): Return `null` from `sandboxUrl` unless the value parses as an `https:` URL whose host matches the deployment allowlist (`*.onrender.com` for this deployment). An iframe `src` taken unchecked from configuration is an injection vector — a mistyped or hostile env value would embed an arbitrary origin inside the forum. Prefer showing nothing over embedding an unvetted host.
+</contract_rules>
+
+<pdd>
+**Only the endpoints with a backend module are implemented.** `POST /api/features/{id}/reboot`,
+`GET /api/broadcast` (US-11), and `GET /api/sandbox` (US-10) are in the frozen `openapi.yaml` but
+have no server route yet, so `onBroadcastEvent` and `onDeployment` are not exposed either.
+`ApiResult` already covers their shapes when they land.
+
+**Realtime needs the anon role to `SELECT` the published tables.** That is granted in `schema.sql`.
+If a table stops being anon-readable, `subscribe` silently delivers nothing rather than erroring —
+a hard failure to diagnose from this side.
+
+**`getMyPitches` returns pending entries that are always `state: "screening"`** in the MVP; the
+backend never reports a rejection or merge outcome. The client passes `state`, `reason`, and the
+`merged_into_*` fields through untouched so that when the backend starts setting them, nothing
+here changes.
+</pdd>
 
 <dependencies>
 <include>prompts/shared/module_map.md</include>
+<include select="lines:11-107">prompts/shared/openapi.yaml</include>
+<include select="lines:184-255">prompts/shared/openapi.yaml</include>
 </dependencies>
+
+<coverage>
+R1: docs/user_stories/story__browse_the_pipeline_board.md
+R2: docs/user_stories/story__browse_the_pipeline_board.md
+R3: docs/user_stories/story__browse_the_pipeline_board.md
+R4: docs/user_stories/story__pitch_a_feature.md
+R5: docs/user_stories/story__pitch_a_feature.md
+R6: docs/user_stories/story__pitch_a_feature.md
+R7: TODO — add a test asserting a failed write is not retried
+R8: docs/user_stories/story__pitch_a_feature.md
+R9: docs/user_stories/story__track_my_pitches.md
+R10: docs/user_stories/story__pitch_a_feature.md
+R11: TODO — add a test asserting no token reaches a log, URL, or error
+R12: TODO — add a test asserting no hardcoded host is present
+R13: docs/user_stories/story__browse_the_pipeline_board.md
+R14: docs/user_stories/story__browse_the_pipeline_board.md
+R15: TODO — add a test asserting a hung request resolves rather than hanging
+R16: docs/user_stories/story__upvote_a_feature.md
+R17: docs/user_stories/story__browse_the_pipeline_board.md
+R18: TODO — add a test asserting a dropped channel does not throw into the caller
+R19: docs/user_stories/story__browse_the_pipeline_board.md
+R20: docs/user_stories/story__preview_the_shipped_feature.md
+R21: docs/user_stories/story__preview_the_shipped_feature.md
+</coverage>

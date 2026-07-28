@@ -81,6 +81,19 @@ All three share `settings.LLM_BASE_URL`, `settings.LLM_API_KEY`, `settings.LLM_T
 value: every one of these calls is a classification or a structured extraction, and none of them
 wants a chatty default.
 
+## React components (frontend)
+
+The project builds with `jsx: "react-jsx"`, so the default `React` import is unnecessary and
+`noUnusedLocals` rejects it. Import only the hooks actually used:
+
+```ts
+import { useState, useEffect, useCallback } from "react";   // correct
+import React, { useState } from "react";                    // fails typecheck
+```
+
+Wire types come from `../api_client` (or `./api_client` at the src root) — there is no
+`contracts.ts`. Only `app_shell.tsx` imports `./styles.css`, once for the whole app.
+
 ## Rule
 
 Import only from the left-hand column above, plus the standard library and declared third-party

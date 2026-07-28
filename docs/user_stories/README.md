@@ -21,3 +21,4 @@ both directions of that link.
 | [13](story__prioritise_an_overwhelming_backlog.md) | Cut through an overwhelming issue backlog |
 | [14](story__demand_signal_instead_of_user_research.md) | Get a demand signal without running user research |
 | [15](story__working_prototype_instead_of_mockups.md) | Validate with a working prototype instead of a design mockup |
+| [16](story__reboot_an_archived_request.md) | Reboot an archived request for a second run |

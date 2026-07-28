@@ -1,0 +1,117 @@
+<pdd-reason>One row on the forum: the idea, where it is in the pipeline, and the button that adds your weight to it. Every stage of a feature's life is read from this card, and each stage has earned its own shape.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"FeatureCard","signature":"function FeatureCard(props: FeatureCardProps): JSX.Element","returns":"a pipeline card, with its unlock tree when the feature is SPLIT"},
+  {"name":"HoldingCard","signature":"function HoldingCard(props: { feature: Feature }): JSX.Element","returns":"a holding-pattern card with the agent's explanation"},
+  {"name":"ShippedCard","signature":"function ShippedCard(props: { feature: Feature }): JSX.Element","returns":"a shipped trophy card"},
+  {"name":"VaultCard","signature":"function VaultCard(props: { feature: Feature; onReboot: (id: string) => void }): JSX.Element","returns":"an archived card with a reboot action"},
+  {"name":"FeatureCardProps","signature":"type FeatureCardProps = { feature: Feature; votedIds: ReadonlySet<string>; onUpvote: (id: string) => void; pendingVoteId?: string | null }","returns":"the component contract"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/frontend/api_client_typescript.prompt</pdd-dependency>
+<pdd-dependency>prompts/frontend/components/upvote_button_typescriptreact.prompt</pdd-dependency>
+
+Implement `frontend/src/components/feature_card.tsx`. `Feature` and `Status` are imported as types
+from `../api_client`; `UpvoteButton` from `./upvote_button`. There is no `contracts.ts`.
+
+<responsibility>
+Render one feature in the shape its stage deserves, and let a visitor add their vote where voting is still open.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT fetch, subscribe, or hold app state; it renders the feature it is handed and calls its callbacks.
+This module DOES NOT decide whether a vote succeeded — the shell owns the request and the reconciliation.
+This module DOES NOT choose which of the four card shapes a tab uses; the shell routes by view.
+This module DOES NOT import `styles.css`; the shell imports it once for the whole app.
+This module DOES NOT invent copy for a status it does not recognise.
+</non_responsibilities>
+
+<vocabulary>
+**Stage pill** — the chip naming what an agent is doing to this feature right now, in the product's language: `🪄 AI Merging Duplicates`, not `CONSOLIDATING`. Nobody should have to learn a database label to use the forum.
+**Frozen count** — the dashed, non-interactive vote total shown once voting has closed for a stage. It keeps the community's verdict visible without inviting a press that would be refused.
+**Unlock tree** — the nested list of children on a `SPLIT` parent. The parent is the idea; the children are the bite-sized parts you can actually vote for, each with its own progress bar toward the threshold that unlocks it.
+</vocabulary>
+
+<capabilities>
+- MAY hold transient presentation state (whether the unlock tree is expanded).
+- MUST NOT call `fetch`, `api_client`, or Supabase.
+- MUST NOT add a hex value, font, radius, or animation — compose only classes from the design guide's closed set.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Build the pipeline card as `article.card.status-{STATUS}` wrapping `card-main` → (`card-copy` → `card-meta`, `card-title`, `card-scope`) and the vote control as the second child of `card-main`. This is the frozen anatomy; the stylesheet lays out nothing that is not in this shape.
+R2 (MUST): Render the feature's `description` as the `card-scope` line. The wire field is `description`; the community calls it the functional scope, and the class name follows the community.
+R3 (MUST): Render `card-meta` as, in order, the stage pill, any dedup note, then `card-byline` reading `{author_handle} · {relative time}`. Derive the relative time from `created_at` locally — minutes under an hour, hours under a day, days beyond.
+R4 (MUST): Map each status to its pill exactly once: `CONSOLIDATING` → `pill-consolidating` with an animated `wand` and `AI Merging Duplicates`; `IN_SPRINT` → `pill-building` with a `loading-ring` and `AI Building`; `COMPILED` → `pill-live` and `Live in Sandbox`; `SPLIT` → `pill-evolving` and `AI Evolving`.
+R5 (MUST): Render **no pill at all** for `VOTING`. The live hype button is that card's status — adding a "in voting" chip next to a button that plainly invites voting is noise, and there is deliberately no `pill-voting` class to reach for.
+R6 (MUST): Render an unrecognised status as a card with no pill rather than crashing or rendering blank, and MUST NOT print the raw enum as user-facing copy. The status set can grow server-side before this component is regenerated.
+R7 (MUST): Render the interactive `UpvoteButton` only on `VOTING`; on every other status render the dashed `vote-frozen` block carrying `▲` and the count. A feature being built is not a feature you can push harder on, and a disabled button says that less clearly than a frozen number does.
+R8 (MUST): Pass `voted` to the button as "this id is in `votedIds`, or the feature's own `viewer_has_voted` is true". A returning visitor must not be invited to click something that will answer `409`.
+R9 (MUST): Pass `disabled` when `pendingVoteId` matches this feature's id, so a double click cannot send two votes for one intent.
+R10 (MUST): Show `{merge_count} matching requests found` in `merge-note` on a `CONSOLIDATING` card, and a builds-on chip when `extends_title` is set. Those are the visible evidence that dedup merged pitches rather than losing them.
+R11 (MUST): On a `SPLIT` parent render an `expand-btn` toggling between `▸ Show unlock tree` and `▾ Hide unlock tree`, carrying `aria-expanded`, and render the tree only while expanded. A split parent with three children is four features' worth of vertical space; collapsed-by-default keeps the board scannable.
+R12 (MUST): Render the tree as `unlock-tree` → `unlock-head` (`Evolved from "{title}"` and `{unlocked}/{total} unlocked`) → a `<ul>` of `unlock-node`, each with a `🔒`/`🔓` `unlock-icon`, `unlock-title`, an `unlock-bar` progress element and an `unlock-count`.
+R13 (MUST): Treat a child as unlocked when its `upvotes` reach its `unlock_threshold`, mark the node `is-unlocked`, and replace its button with `Unlocked!` copy. Below the threshold show `{upvotes} / {threshold} votes to unlock` and a small `UpvoteButton`.
+R14 (MUST): Treat a **null** `unlock_threshold` as "no bar to show" — render the count alone, keep the child votable, and MUST NOT substitute zero or a default. Zero would make every child render as instantly unlocked, which is a lie about work nobody has voted for; the architect currently assigns children no threshold, so this is the common case, not the edge case.
+R15 (MUST): Build the progress bar as a `div.unlock-bar` wrapping a single `<span>` whose width is set inline as a percentage, and MUST NOT use the native `<progress>` element. The stylesheet styles `.unlock-bar` as a rounded track and `.unlock-bar span` as the gradient fill; a `<progress>` renders as the browser's own widget and ignores both rules entirely.
+R15a (MUST): Give that bar `role="progressbar"` with `aria-valuenow`, `aria-valuemax`, and a label naming the child and its progress. A bar that only reads as a coloured rectangle communicates nothing to a screen-reader user.
+R16 (MUST): Render `children` only when the list is non-empty, and MUST NOT guard against `children` being undefined — the API always sends a list (features route R33).
+R17 (MUST): Build `HoldingCard` as `card card-holding` → `holding-header` (a `⏸` `holding-badge`, the title, a `holding-sub` reading `Structural Paradox Detected · holding cycle {postpone_count} of 2`, and a frozen count) followed by an `ai-explains` panel labelled `🤖 Why the pause`.
+R18 (MUST): Show `ai_explanation` in that panel. It is the only thing the community is ever told about why an idea was held back, and a holding card without its reason reads as the system quietly binning the pitch.
+R19 (MUST): Build `ShippedCard` with a `pill-shipped` reading `🏆 Shipped in {shipped_version}`, the byline as the relative `shipped_at`, and a `shipped-credit` paragraph reading `Pitched by {author_handle} · live in the sandbox` with the handle in `<strong>`. The version is the proof that the loop closed, and the credit is the reward the pitcher actually came for.
+R20 (MUST): Build `VaultCard` with a `pill-vault`, the standard archived explanation in place of the scope, and a `reboot-btn` calling `onReboot` with the feature id. An archive nobody can escape is a graveyard; the reboot is what makes it a vault.
+R21 (MUST NOT): Render `author_id`, or any id, as visible text. `author_handle` is the only identity the board shows, and it is nullable — omit the byline rather than printing `anonymous`, `unknown`, or `null`.
+R22 (MUST): Pass the feature's title to every `UpvoteButton` as its `label`, on parents as well as children. Without it every vote control on the board shares the accessible name `Upvote — 3 upvotes`, so a screen-reader user tabbing a list of twenty features cannot tell which idea they are about to vote for.
+R23 (MUST): Keep every card operable by keyboard: each control is a real `<button>`, and nothing interactive is a bare `div` with a click handler.
+</contract_rules>
+
+<pdd>
+The four exports share `card` and its children rather than being one component with a mode switch,
+because the stages genuinely differ in structure: only holding has an explanation panel, only
+shipped has a credit line, only the pipeline card can carry an unlock tree. A single component
+covering all four would be a chain of conditionals longer than the four bodies together.
+
+`postpone_count` maps to the mock's "holding cycle N of 2". Two is a constant here rather than a
+wire field — nothing in the schema carries a maximum yet, and US-07 is where that number would
+acquire real meaning.
+
+Optimistic counting lives in the shell, not here: this card renders the number it is handed. The
+button's own press feedback (`is-voted`, the burst) is what makes the interaction feel instant, so
+the card does not also need to guess at the count.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include>prompts/frontend/design_guide.md</include>
+<include optional>frontend/src/api_client.ts</include>
+<include optional>frontend/src/components/upvote_button.tsx</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__browse_the_pipeline_board.md
+R2: docs/user_stories/story__browse_the_pipeline_board.md
+R3: docs/user_stories/story__browse_the_pipeline_board.md
+R4: docs/user_stories/story__watch_the_agents_work.md
+R5: docs/user_stories/story__upvote_a_feature.md
+R6: frontend/src/components/feature_card.test.tsx
+R7: docs/user_stories/story__upvote_a_feature.md
+R8: docs/user_stories/story__upvote_a_feature.md
+R9: docs/user_stories/story__upvote_a_feature.md
+R10: docs/user_stories/story__dedup_against_existing_features.md
+R11: docs/user_stories/story__browse_the_pipeline_board.md
+R12: docs/user_stories/story__prioritise_an_overwhelming_backlog.md
+R13: docs/user_stories/story__prioritise_an_overwhelming_backlog.md
+R14: frontend/src/components/feature_card.test.tsx
+R15: frontend/src/components/feature_card.test.tsx
+R15a: frontend/src/components/feature_card.test.tsx
+R16: docs/user_stories/story__browse_the_pipeline_board.md
+R17: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R18: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R19: docs/user_stories/story__preview_the_shipped_feature.md
+R20: docs/user_stories/story__reboot_an_archived_request.md
+R21: frontend/src/components/feature_card.test.tsx
+R22: docs/user_stories/story__upvote_a_feature.md
+R23: frontend/src/components/feature_card.test.tsx
+</coverage>
