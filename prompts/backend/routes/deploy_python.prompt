@@ -36,13 +36,13 @@ Allowlist: `settings.SANDBOX_ALLOWED_HOSTS`. A preview URL outside it is refused
 </vocabulary>
 
 <capabilities>
-- MAY read and write `deployments` and `feature_requests`, and file decisions.
+- MAY read and write `deployments` and `feature_requests`, file decisions, and publish to Redis `agent_events`.
 - MAY read `settings` for the shared secret, the allowlist and the bootstrap URL.
 - MUST NOT call Render, run a subprocess, or make any outbound request.
 </capabilities>
 
 <contract_rules>
-R1 (MUST): Authenticate `POST /webhooks/render` with the shared secret from `settings.RENDER_WEBHOOK_SECRET`, comparing in constant time, and answer `401` when it is absent or wrong. This endpoint moves features to shipped; an unauthenticated caller could mark anything live.
+R1 (MUST): Authenticate `POST /webhooks/render` with the shared secret from `settings.RENDER_WEBHOOK_SECRET`, read from the `X-Webhook-Secret` header (the name FastAPI derives from an `x_webhook_secret` parameter — callers must use exactly this spelling), comparing in constant time, and answer `401` when it is absent or wrong. This endpoint moves features to shipped; an unauthenticated caller could mark anything live.
 R2 (MUST): Exclude the webhook from CORS and from any browser-facing auth. It is a server-to-server call, and the frozen spec places it outside `/api` for exactly that reason.
 R3 (MUST): Validate `preview_url` against `settings.SANDBOX_ALLOWED_HOSTS`, whose entries are **wildcard patterns** such as `*.onrender.com`, and reject a `deploy_live` whose URL falls outside it. Exact string membership is wrong and refuses every real deploy: `streaks-demo.onrender.com` is not equal to `*.onrender.com`. Require `https` as well — the URL is loaded in an iframe on a page the community trusts. That value becomes an `iframe src` on the public board, so an unchecked host is a stored injection vector aimed at every visitor.
 R4 (MUST): Require `preview_url` on `deploy_live` and answer `400` without it. A live deploy nobody can open is not a deploy.
@@ -51,6 +51,8 @@ R6 (MUST): Move every feature named in `feature_ids` from `IN_SPRINT` to `COMPIL
 R7 (MUST NOT): Move a feature that is not currently `IN_SPRINT`. A webhook replay, or an id the platform sent twice, must not resurrect an archived feature or re-ship one already live.
 R8 (MUST): Be idempotent on `render_deploy_id` — a redelivered webhook for a deploy already recorded answers `204` without inserting a second row. Platforms retry, and a duplicated deploy row would double-count the shipped set.
 R9 (MUST): On `deploy_failed`, return the named features to `VOTING` and insert no `deployments` row. The build did not reach anyone, so the feature has not shipped; it keeps its votes and can be built again.
+R10a (MUST): Publish a `deployed` `agent_events` message to Redis on a `deploy_live`, carrying phase and micro-copy only. This is what the relay turns into a `broadcast_events` row, which is what the chyron shows and what raises the "new build ready" pulse on the preview panel. Without it the entire chain downstream — ticker line, success phase, pulse — waits for an event that never arrives, and the community is never told their feature went live.
+R10b (MUST NOT): Fail the webhook because the publish failed. Redis being briefly unavailable must not make the platform retry a deploy that was already recorded.
 R10 (MUST): File a decision at phase `deploy` with agent `deploy_webhook` and `PROGRAMMATIC` as the model version, recording the event, the version, and how many features it carried. No model is involved and claiming one corrupts the dataset.
 R11 (MUST NOT): Let a failed decision write change the response. The deploy happened whether or not the record could be filed.
 R12 (MUST): Answer `GET /api/sandbox` with the most recent deployment as `{status: "live", preview_url, version, deployed_at}`.
@@ -100,6 +102,8 @@ R7: docs/user_stories/story__threshold_triggers_a_sprint.md
 R8: backend/tests/test_deploy.py
 R9: docs/user_stories/story__compile_spec_into_source_code.md
 R10: docs/user_stories/story__decision_log.md
+R10a: docs/user_stories/story__watch_the_agents_work.md
+R10b: docs/user_stories/story__watch_the_agents_work.md
 R11: docs/user_stories/story__decision_log.md
 R12: docs/user_stories/story__preview_the_shipped_feature.md
 R13: docs/user_stories/story__preview_the_shipped_feature.md

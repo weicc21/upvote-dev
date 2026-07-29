@@ -10,6 +10,7 @@ It records what the platform reports.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 from typing import Any
 from fnmatch import fnmatch
@@ -18,12 +19,13 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Header, Request, Response
 from supabase._async.client import AsyncClient
 
-from backend.deps import get_settings, get_supabase, raise_error
+from backend.deps import get_redis, get_settings, get_supabase, raise_error
 from orchestrator.decisions import PROGRAMMATIC, record_decision
 from shared.config import Settings
 from shared.constants import (
     DecisionPhase,
     FeatureStatus,
+    REDIS_AGENT_EVENTS,
     TABLE_DEPLOYMENTS,
     TABLE_FEATURE_REQUESTS,
 )
@@ -108,11 +110,34 @@ async def get_sandbox(
 # ---------------------------------------------------------------------------
 
 
+
+async def _publish_deployed(redis: Any, version: str, count: int) -> None:
+    """Announce a live deploy on the ticker (R10a).
+
+    First link in the chain that ends with the "new build ready" pulse:
+    agent_events -> event_relay -> broadcast_events -> Realtime -> chyron ->
+    success phase -> pulse. Phase and micro-copy only; the ticker is public.
+    """
+    payload = {
+        "phase": "deployed",
+        "message": (
+            f"Shipped {version} to the sandbox — {count} feature"
+            f"{'s' if count != 1 else ''} live. Refresh the preview!"
+        ),
+    }
+    try:
+        await redis.publish(REDIS_AGENT_EVENTS, json.dumps(payload))
+    except Exception:  # noqa: BLE001
+        # R10b: never fail a recorded deploy because the ticker is unreachable.
+        logger.warning("Failed to publish deployed event", exc_info=True)
+
+
 @router.post("/webhooks/render", status_code=204)
 async def render_webhook(
     request: Request,
     x_webhook_secret: str | None = Header(default=None),
     supabase: AsyncClient = Depends(get_supabase),
+    redis: Any = Depends(get_redis),
     cfg: Settings = Depends(get_settings),
 ) -> Response:
     """Handle Render deploy webhooks (server-to-server, no CORS)."""
@@ -192,6 +217,9 @@ async def render_webhook(
                 logger.warning(
                     "Failed to move feature %s to COMPILED", fid, exc_info=True
                 )
+
+        # R10a: announce it, so the chyron and the refresh pulse actually fire
+        await _publish_deployed(redis, str(version), len(feature_ids))
 
         # R10/R11: file decision — failure must not change the response
         try:

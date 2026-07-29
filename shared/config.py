@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # has ever deployed anything. Optional: without it a fresh install
     # simply reports status=none.
     SANDBOX_URL: str | None = None
+    # Where this system's own API answers, for components that call it rather
+    # than being called by it (the publisher self-posts /webhooks/render).
+    # NOT FORUM_ORIGIN — that is the browser origin of the frontend.
+    SELF_API_BASE: str = "http://127.0.0.1:8000"
     DEV_MODE: bool = False
 
     # Tunables — fallbacks imported from shared/constants.py (R2)

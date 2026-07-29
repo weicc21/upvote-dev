@@ -85,6 +85,13 @@ Three things about invoking it:
 `--force` is required in the command: without it pdd asks `Overwrite existing files? [Y/n]` and, with
 no TTY, hangs rather than failing. `--local` keeps execution off the PDD Cloud relay.
 
+## HTTP clients available to Python modules
+
+`httpx` is the only async HTTP client installed (`pyproject.toml` declares it; supabase-py depends on
+it). **`aiohttp` and `requests` are NOT installed** — importing either raises `ModuleNotFoundError`
+at first use, which surfaces as a pipeline step failing at runtime rather than at import, long after
+the tests pass against injected seams.
+
 ## PostgREST behaviours this project relies on
 
 - **Repeated `or=` parameters compose as AND.** `.or_(a).or_(b)` is `(a) AND (b)`, which is what lets

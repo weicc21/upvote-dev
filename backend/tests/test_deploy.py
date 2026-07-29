@@ -251,3 +251,61 @@ def test_r16_the_sandbox_read_is_anonymous(make_client, fake_supabase) -> None:
     """Board reads are anonymous; the preview is part of the board."""
     r = make_client(user_id=None).get("/api/sandbox")
     assert r.status_code == 200
+
+
+# ===========================================================================
+# R10a / R10b — the deploy announces itself (US-11 chain)
+# ===========================================================================
+
+
+def _spy_publish(fake_redis) -> list[tuple[str, str]]:
+    """Record what reaches Redis. `fake_redis` is a real fakeredis instance, so
+    there is no capture list on it — wrap the method instead."""
+    seen: list[tuple[str, str]] = []
+    original = fake_redis.publish
+
+    async def _rec(channel, payload):
+        seen.append((str(channel), str(payload)))
+        return await original(channel, payload)
+
+    fake_redis.publish = _rec  # type: ignore[method-assign]
+    return seen
+
+
+def test_r10a_a_live_deploy_publishes_the_ticker_event(make_client, fake_supabase, fake_redis) -> None:
+    """Without this the refresh-preview pulse waits for an event that never arrives.
+
+    Chain: agent_events -> event_relay -> broadcast_events -> Realtime ->
+    chyron -> success phase -> pulse.
+    """
+    seen = _spy_publish(fake_redis)
+    fake_supabase.rows[TABLE_FEATURES] = [in_sprint_row()]
+    post(make_client(), deploy_payload())
+    assert seen, "the deploy left the ticker silent"
+    channel, payload = seen[0]
+    assert channel == "agent_events"
+    # event_relay maps on this exact phase string.
+    assert json.loads(payload)["phase"] == "deployed"
+
+
+def test_r10a_the_ticker_line_carries_no_feature_detail(make_client, fake_supabase, fake_redis) -> None:
+    """The ticker is public and micro-copy only."""
+    seen = _spy_publish(fake_redis)
+    fake_supabase.rows[TABLE_FEATURES] = [in_sprint_row(title="Blockchain check-ins")]
+    post(make_client(), deploy_payload())
+    blob = " ".join(p for _c, p in seen)
+    assert "Blockchain" not in blob
+    assert FID not in blob
+
+
+def test_r10b_a_redis_outage_does_not_fail_the_webhook(make_client, fake_supabase, fake_redis) -> None:
+    """The platform must not retry a deploy that was already recorded."""
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("redis unreachable")
+
+    fake_redis.publish = _boom  # type: ignore[method-assign]
+    fake_supabase.rows[TABLE_FEATURES] = [in_sprint_row()]
+    r = post(make_client(), deploy_payload())
+    assert r.status_code == 204
+    assert fake_supabase.rows[TABLE_FEATURES][0]["status"] == FeatureStatus.COMPILED.value

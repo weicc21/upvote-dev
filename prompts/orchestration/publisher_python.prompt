@@ -1,0 +1,112 @@
+<pdd-reason>The last unautomated step. A compile leaves new source on a disk; this pushes it, waits for the platform to actually serve it, and tells the system it is live — without holding the sprint hostage while a build runs.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"PublishOutcome","signature":"@dataclass(frozen=True) class PublishOutcome","returns":"ok: bool; commit_sha: str | None; deploy_id: str | None; status: str; detail: str"},
+  {"name":"HttpGet","signature":"HttpGet = Callable[[str, Mapping[str, str]], Awaitable[tuple[int, str]]]","returns":"injected seam: (url, headers) -> (status, body)"},
+  {"name":"HttpPost","signature":"HttpPost = Callable[[str, Mapping[str, str], str], Awaitable[tuple[int, str]]]","returns":"injected seam: (url, headers, body) -> (status, body)"},
+  {"name":"snapshot_deploy_ids","signature":"async def snapshot_deploy_ids(*, get: HttpGet | None = None) -> set[str]","returns":"the deploy ids Render already knows about, taken before pushing"},
+  {"name":"push_target","signature":"async def push_target(*, runner: Runner | None = None) -> str","returns":"commit and push the target app; returns the pushed commit sha"},
+  {"name":"await_deploy","signature":"async def await_deploy(commit_sha: str, known_ids: set[str], *, get: HttpGet | None = None, timeout_s: float = 900.0, interval_s: float = 10.0) -> PublishOutcome","returns":"poll until the deploy we caused reaches a terminal status"},
+  {"name":"post_webhook","signature":"async def post_webhook(outcome: PublishOutcome, feature_ids: Sequence[str], *, post: HttpPost | None = None) -> bool","returns":"self-post the signed deploy webhook; True when accepted"},
+  {"name":"publish","signature":"async def publish(feature_ids: Sequence[str], *, runner: Runner | None = None, get: HttpGet | None = None, post: HttpPost | None = None) -> PublishOutcome","returns":"push, await the deploy, then report it — the whole sequence"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+
+Implement `orchestrator/publisher.py`. It runs after a successful compile: it pushes the target app,
+waits for Render to serve that specific build, and then posts this system's own
+`POST /webhooks/render`.
+
+<responsibility>
+Get the compiled app in front of people, and report the moment it is genuinely serving — the build we caused, not merely a healthy site.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT compile. `compiler.py` produced the source; this publishes it.
+This module DOES NOT select features or read `feature_requests`. It is handed the ids the build carried.
+This module DOES NOT write `deployments` or move a feature to `COMPILED`. The webhook endpoint owns both, so a manual Render deploy and an automated one converge on exactly one code path.
+This module DOES NOT block the sprint. The caller starts it and moves on.
+This module DOES NOT trigger a Render deploy through the API — the git push does that, which is what Render is configured to watch.
+</non_responsibilities>
+
+<vocabulary>
+Successful: of a publish, that our deploy reported `live`. Of a compile, something that already happened before this module was called.
+Safe: of a repeated webhook post, that the endpoint is idempotent on `render_deploy_id` so no duplicate row is written. Safe is not a reason to retry.
+Our deploy: the one deploy this push caused, identified by an id absent from the pre-push snapshot whose `commit.id` equals the sha we pushed. Neither half is sufficient alone.
+Terminal status: `live`, `build_failed`, `update_failed`, `canceled`, `pre_deploy_failed`, `deactivated`. Everything else (`created`, `queued`, `build_in_progress`, `update_in_progress`, `pre_deploy_in_progress`) means keep waiting.
+Live: our deploy reporting `live`. Not "the site returns 200" — the previous build answers 200 the entire time a new one is building.
+</vocabulary>
+
+<capabilities>
+- MAY run git through the injected runner, call the Render API through the injected `get`, and post the webhook through the injected `post`.
+- MUST NOT read or write Postgres, publish to Redis, or call a model.
+- MUST NOT import `sprint_service` or `compiler`; the caller sequences them.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Identify our deploy as one whose id is **absent from a snapshot taken before the push** *and* whose `commit.id` matches the sha we pushed. Neither test alone works: the site is `live` on the old build throughout a new build, and the same commit is legitimately deployed many times — a real service history shows five deploys sharing one sha, two of them `build_failed`. Matching on sha alone would report a week-old failure as this build's outcome.
+R2 (MUST): Take the snapshot **before** pushing. Afterwards it is impossible to tell which deploys predate us.
+R3 (MUST NOT): Treat "the preview URL answers 200" as evidence of anything. The previous build serves the whole time; this is precisely the confusion R1 exists to remove.
+R4 (MUST): Read the deploy list from `GET https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys`, authenticated with `Bearer {RENDER_API_KEY}`. Each list item is wrapped as `{"deploy": {...}}`, and the fields used are `deploy.id`, `deploy.status`, `deploy.commit.id`, `deploy.createdAt` — verified against the live API, not inferred.
+R5 (MUST): Poll on a bounded interval until our deploy reaches a terminal status or the timeout expires, and treat the timeout as a failure rather than assuming success. A build that never finishes has not shipped.
+R6 (MUST): Treat only `live` as success. `deactivated` means a later deploy superseded ours, which is not this build going live.
+R7 (MUST): Tolerate our deploy not appearing immediately — Render takes a moment to register a push. Keep polling until the timeout rather than concluding on the first empty result.
+R8 (MUST): Post to `settings.SELF_API_BASE` + `/webhooks/render` — **not** `FORUM_ORIGIN`, which is the frontend's browser origin and answers `404` for this path, and not `SANDBOX_URL`, which is the deployed target app. This has already cost one live run. Post to this system's own `POST /webhooks/render` on success with a body whose keys are exactly `event`, `render_deploy_id`, `version`, `preview_url`, `feature_ids` — the discriminator field is **`event`**, not `type`; the endpoint and the frozen `openapi.yaml` both read `event`, and any other name means our own webhook rejects our own post. Send `event: "deploy_live"` on success and `event: "deploy_failed"` with the same ids on failure so the features return to `VOTING` instead of stalling in `IN_SPRINT`.
+R9 (MUST): Send the secret in the header the endpoint actually reads — `X-Webhook-Secret`, which is what FastAPI derives from its `x_webhook_secret` parameter. Inventing a name such as `X-Render-Secret` is a silent `401` from our own endpoint; this has already cost one live run. Never log it, and MUST NOT log it, the API key, or any other credential.
+R10 (MUST): Use `settings.SANDBOX_URL` as the `preview_url`. The webhook validates it against the allowlist, so a value from anywhere else would be rejected by our own endpoint.
+R11 (MUST): Derive `version` from the deploy — its short commit sha is the honest answer, because that is what Render served.
+R12 (MUST NOT): Retry the webhook post more than once. The endpoint is idempotent on `render_deploy_id`, so a retry is safe but pointless; report failure and let the operator see it rather than looping.
+R13 (MUST): Push by invoking the target repo's own `deploy.sh` through the injected runner with `SKIP_COMPILE=1` set and `SKIP_PUSH` **explicitly removed from the child environment** rather than merely unset in this process — a daemon started from a shell that had it exported would otherwise never push, and would report success having shipped nothing. Do not reimplement the script's logic: and MUST NOT reimplement its commit-and-push logic. That script is what the target project maintains; duplicating it here means two things to keep in step.
+R13a (MUST): Set `SKIP_COMPILE=1` when invoking `deploy.sh`. `compiler.py` has already produced the source from the blueprint, and the script recompiles by default — leaving it unset pays for a second pdd call per cycle, adds minutes to every publish, and hands the compiler model a second opportunity to re-roll the app's whole appearance behind the blueprint's Design Lock. The publisher publishes what was compiled; it does not compile.
+R14 (MUST): Return the pushed commit sha from the push step, since R1 depends on it. Fail loudly if it cannot be determined — polling for an unknown sha would match nothing and time out looking successful in the logs.
+R14a (MUST): Use the same `Runner` shape as `compiler.py` — `(command: str, cwd: Path, env: Mapping[str, str]) -> (returncode, stdout, stderr)`, positional. Two runner signatures in one codebase means every future module picks one at random and every test has to know which.
+R15 (MUST): Accept every outbound call as an injected seam (`runner`, `get`, `post`), so the whole sequence is testable without a network, a git remote, or a Render account. The **defaults must use `httpx`** — it is the only async HTTP client installed; `aiohttp` is not a dependency, and reaching for it means the module imports fine and then fails the first time it is actually used.
+R16 (MUST NOT): Raise out of `publish`. Return a `PublishOutcome` describing what happened. The caller is a pipeline step that must keep going.
+R17 (MUST): Log each transition — pushed, deploy identified, status changes, terminal outcome — at info, without credentials. This is the step most likely to be watched live during a demo.
+</contract_rules>
+
+<pdd>
+**Why this is not part of `sprint_service`.** The sprint selects one winner and must stay responsive:
+its own contract says it neither compiles nor deploys, and it holds a Redis lock while it runs.
+Waiting minutes for a Render build inside that lock would block every later sprint and make a slow
+build look like a wedged system. Keeping the publisher separate lets the caller fire it and move on,
+which is the asynchrony that matters — the sprint returns as soon as the push is away.
+
+**Why the webhook rather than writing `deployments` directly.** A manual `./deploy.sh` and this
+automated path then converge on one code path with one set of validations, and the webhook already
+owns idempotency, the allowlist check, the `COMPILED` transition and the ticker announcement. A
+second writer would have to keep all of that in step.
+
+**`deactivated` is deliberately a failure.** It means a newer deploy replaced ours before it went
+live, so reporting it as success would mark features shipped on the strength of a build nobody ever
+served.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/config.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__preview_the_shipped_feature.md
+R2: docs/user_stories/story__preview_the_shipped_feature.md
+R3: docs/user_stories/story__preview_the_shipped_feature.md
+R4: docs/user_stories/story__preview_the_shipped_feature.md
+R5: docs/user_stories/story__preview_the_shipped_feature.md
+R6: docs/user_stories/story__preview_the_shipped_feature.md
+R7: orchestrator/tests/test_publisher.py
+R8: docs/user_stories/story__compile_spec_into_source_code.md
+R9: orchestrator/tests/test_publisher.py
+R10: docs/user_stories/story__preview_the_shipped_feature.md
+R11: docs/user_stories/story__preview_the_shipped_feature.md
+R12: orchestrator/tests/test_publisher.py
+R13: docs/user_stories/story__compile_spec_into_source_code.md
+R13a: orchestrator/tests/test_publisher.py
+R14: docs/user_stories/story__compile_spec_into_source_code.md
+R14a: orchestrator/tests/test_publisher.py
+R15: orchestrator/tests/test_publisher.py
+R16: docs/user_stories/story__threshold_triggers_a_sprint.md
+R17: docs/user_stories/story__decision_log.md
+</coverage>

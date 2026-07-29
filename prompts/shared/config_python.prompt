@@ -52,6 +52,7 @@ Settings, by group. Required keys have no default and MUST NOT be given one:
 | `FORUM_ORIGIN` | `str` | yes | — |
 | `SUPABASE_JWT_SECRET` | `SecretStr \| None` | no | `None` |
 | `RENDER_API_KEY` | `SecretStr \| None` | no | `None` |
+| `SELF_API_BASE` | `str` | no | `http://127.0.0.1:8000` |
 | `SANDBOX_URL` | `str \| None` | no | `None` |
 | `RENDER_SERVICE_ID` | `str \| None` | no | `None` |
 | `DEV_MODE` | `bool` | no | `False` |
