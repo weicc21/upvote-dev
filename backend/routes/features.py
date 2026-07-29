@@ -10,7 +10,7 @@ import json
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -236,6 +236,9 @@ _VIEW_STATUSES: dict[str, list[str]] = {
         FeatureStatus.CONSOLIDATING,
         FeatureStatus.IN_SPRINT,
         FeatureStatus.SPLIT,
+        # COMPILED appears here only inside the 48h celebration window (R39b);
+        # the shipped view keeps it forever.
+        FeatureStatus.COMPILED,
     ],
     "shipped": [FeatureStatus.COMPILED],
     "holding": [FeatureStatus.POSTPONED_CONFLICT],
@@ -243,7 +246,13 @@ _VIEW_STATUSES: dict[str, list[str]] = {
 }
 
 # Statuses valid for the `status` CSV filter (pipeline view only)
-_PIPELINE_STATUSES = {FeatureStatus.VOTING, FeatureStatus.CONSOLIDATING, FeatureStatus.IN_SPRINT}
+# R39a: derived, never a second literal. These two sets drifted once — the view
+# gained SPLIT while this stayed behind, so the board's own "🚀 AI Evolving" chip
+# was refused with 400 by the endpoint that ships it.
+_PIPELINE_STATUSES = set(_VIEW_STATUSES["pipeline"])
+
+# R39b: how long a shipped feature keeps celebrating on the pipeline.
+_CELEBRATION_WINDOW = timedelta(hours=48)
 
 # ---------------------------------------------------------------------------
 # Feature row → FeatureOut helper
@@ -299,6 +308,25 @@ def _row_to_feature(
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+
+
+
+async def _celebrating_feature_ids(supabase: AsyncClient) -> list[str]:
+    """Ids of features deployed inside the celebration window (R39b).
+
+    Read separately because `deployed_at` lives in `feature_shipped_meta`, and
+    PostgREST cannot embed that view into `feature_requests` — there is no FK,
+    only a jsonb array. The set is naturally small: it is one row per feature
+    deployed in the last 48 hours.
+    """
+    cutoff = (datetime.now(timezone.utc) - _CELEBRATION_WINDOW).isoformat()
+    resp = (
+        await supabase.table(_SHIPPED_META_VIEW)
+        .select("feature_id")
+        .gte("deployed_at", cutoff)
+        .execute()
+    )
+    return [str(r["feature_id"]) for r in (resp.data or [])]
 
 
 async def _fetch_shipped_meta(
@@ -629,6 +657,24 @@ async def list_features(
         .is_("parent_id", "null")
         .in_("status", statuses)
     )
+
+    # R39b: the celebration window is applied *in the query* so a page is never
+    # short-changed. Filtering after the fetch silently returns fewer than
+    # `limit` rows whenever an expired COMPILED row occupied a slot, which
+    # compounds with every page of deep pagination.
+    if view == "pipeline" and FeatureStatus.COMPILED in statuses:
+        celebrating = await _celebrating_feature_ids(supabase)
+        if celebrating:
+            # Keep everything that is not COMPILED, plus the fresh ones.
+            # Two `or=` filters compose as AND in PostgREST, so this sits
+            # happily alongside the keyset-pagination filter below.
+            query = query.or_(
+                f"status.neq.{FeatureStatus.COMPILED},id.in.({','.join(celebrating)})"
+            )
+        else:
+            # Nothing is celebrating: drop COMPILED outright rather than send a
+            # degenerate `id.in.()`, which PostgREST rejects.
+            query = query.neq("status", FeatureStatus.COMPILED)
 
     # Vault search (q parameter)
     if q and view == "vault":

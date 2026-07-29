@@ -1,0 +1,99 @@
+<pdd-reason>The way out of the Vault. Everything else in this system moves a feature forward; this is the only path that moves one back into play, and without it the archive is a place ideas go to die quietly.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"router","signature":"router: APIRouter","returns":"POST /api/features/{feature_id}/reboot"},
+  {"name":"reboot_feature","signature":"POST /api/features/{feature_id}/reboot","returns":"200 Feature | 401 | 404 | 422 not_archived"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/decisions_python.prompt</pdd-dependency>
+
+Implement `backend/routes/lifecycle.py`. It is a **separate router that shares the `/api/features`
+prefix**, exactly as `votes.py` does — the reboot is a lifecycle transition rather than part of the
+board read, and keeping it out of `features.py` leaves that module's read path untouched.
+
+<responsibility>
+Bring an archived request back into play with a clean voting window, so the Vault is a shelf rather than a grave.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT re-screen, re-dedup, or re-shape the request. It was screened when it was pitched and it is the same idea; sending it back through the pipeline would spend agent calls on work already done.
+This module DOES NOT enqueue anything to Redis. The frozen spec says "no re-enqueue".
+This module DOES NOT charge a Pitch Coin. Reviving an existing idea is not pitching a new one.
+This module DOES NOT archive anything — the sprint's end-of-cycle maintenance owns the outbound direction (US-07).
+This module DOES NOT read the board or serve any list; `features.py` owns every read.
+</non_responsibilities>
+
+<vocabulary>
+Reboot: moving one `ARCHIVED` feature back to `VOTING` with a fresh window. The frozen `openapi.yaml` defines it as "ARCHIVED -> VOTING; resets created_at and upvotes to 1; no re-enqueue".
+Fresh window: a reset `created_at`. Both the "newest" sort and the sprint's decay sweep measure from it, so without the reset a revived request is instantly stale again and the next sweep re-archives it.
+Reviver: the identified user who pressed the control. Their vote is the one the new window starts with; they need not be the original author.
+</vocabulary>
+
+<capabilities>
+- MAY read and write `feature_requests` and `feature_votes` through the injected Supabase client.
+- MAY file a decision.
+- MUST NOT call a model, publish to Redis, or touch the intake path.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Implement `POST /api/features/{feature_id}/reboot` exactly as the frozen `openapi.yaml` declares it — `ARCHIVED` → `VOTING`, `created_at` and `upvotes` reset, no re-enqueue — returning the updated `Feature`.
+R2 (MUST): Require an identified user and answer `401` without one, but MUST NOT require the original author. The point is present demand: if only the author could revive an idea, one whose author has moved on stays archived however many people now want it.
+R3 (MUST): Answer `422` with `error.code` exactly `not_archived` when the feature exists but is in any other status. The control only ever appears on the Vault, so this means the client is looking at a stale board — it is a refusal, not a server failure.
+R4 (MUST): Answer `404` for a feature id that does not exist, distinctly from `422`.
+R5 (MUST): Set `upvotes` to **1**, not 0 — the reviver's own vote, exactly as a fresh pitch starts at 1 with its author's. Zero would put a feature on the board that nobody appears to want, including the person who just asked for it.
+R6 (MUST): Write the reviver's `feature_votes` row in the same operation. A count of 1 with no vote row is the inconsistency that let an author double-vote their own pitch once already; `upvotes` and the number of vote rows must agree.
+R7 (MUST): Delete the feature's prior `feature_votes` rows as part of the reset. The new window measures current demand — leaving the old rows would both contradict the count and stop everyone who voted last time from voting again.
+R8 (MUST): Reset `created_at` to now. It is what the "newest" sort and the sprint's decay sweep both measure from; without it a revived request is immediately eligible for re-archiving and can round-trip to the Vault before anyone sees it.
+R9 (MUST): Guard the whole transition on the row still being `ARCHIVED` at write time, so two people pressing reboot at once produce one reboot rather than two resets and two votes.
+R10 (MUST NOT): Alter `title`, `description`, `author_id`, `author_handle`, `parent_id`, `extends_id`, `merge_count`, or `postpone_count`. It is the same idea getting another run; rewriting its identity or erasing its history would make the Vault a laundry.
+R11 (MUST): Return the full `Feature` shape the board renders, with `children` present as a list, so the client can drop the row straight into the pipeline it now belongs to. **`author_id` MUST NOT appear in the response** — the features route already forbids it everywhere else, and reading a row that contains it is not a reason to echo it back.
+R12 (MUST): File a decision at phase `lifecycle` with agent `reboot`, recording the feature and that a human triggered it, with `PROGRAMMATIC` as the model version — no model was involved. This is the one transition in the system a person causes directly, which makes it the one most worth being able to audit.
+R13 (MUST NOT): Let a failed decision write change the response. The reboot happened whether or not the record could be filed.
+R14 (MUST): Take the Supabase client and the caller's identity through the existing dependencies, never constructing either, so the whole path is testable against the fake the other routes already use.
+</contract_rules>
+
+<pdd>
+**A separate router rather than an addition to `features.py`.** `votes.py` already sets the
+precedent of a second router sharing the `/api/features` prefix, and `features.py` is the largest,
+most-patched module in the backend — its read path has been corrected several times and there is no
+reason for a lifecycle write to put it at risk.
+
+**Rate limiting is deliberately absent.** A reboot costs no coin and no agent call, and the only
+thing it can do is move a feature the community had already stopped voting for back onto the board,
+where it needs real votes to go anywhere. If reboot spam ever becomes a problem the honest fix is a
+cooldown on the feature (one reboot per window), not a per-user limit — the point is present demand,
+so who asked matters less than whether it keeps being asked.
+
+**`postpone_count` survives on purpose.** A feature that was held twice before being archived carries
+that history back with it; the architect should judge it in full knowledge of what happened last
+time, not as though it were new.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include select="lines:109:117">prompts/shared/openapi.yaml</include>
+<include optional>shared/constants.py</include>
+<include optional>backend/deps.py</include>
+<include optional>backend/routes/votes.py</include>
+<include optional>orchestrator/decisions.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__reboot_an_archived_request.md
+R2: docs/user_stories/story__reboot_an_archived_request.md
+R3: docs/user_stories/story__reboot_an_archived_request.md
+R4: backend/tests/test_lifecycle.py
+R5: docs/user_stories/story__reboot_an_archived_request.md
+R6: docs/user_stories/story__upvote_a_feature.md
+R7: docs/user_stories/story__reboot_an_archived_request.md
+R8: docs/user_stories/story__reboot_an_archived_request.md
+R9: docs/user_stories/story__threshold_triggers_a_sprint.md
+R10: docs/user_stories/story__reboot_an_archived_request.md
+R11: docs/user_stories/story__browse_the_pipeline_board.md
+R12: docs/user_stories/story__decision_log.md
+R13: docs/user_stories/story__decision_log.md
+R14: backend/tests/test_lifecycle.py
+</coverage>

@@ -5,6 +5,8 @@ import "./styles.css";
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   listFeatures,
+  listBroadcastEvents,
+  rebootFeature,
   upvote,
   createFeature,
   getMyPitches,
@@ -16,8 +18,9 @@ import {
   type Sort,
   type ApiResult,
   type PendingPitch,
+  type BroadcastEvent,
 } from "./api_client";
-import { Broadcast } from "./components/broadcast";
+import { Broadcast, type BroadcastMessage } from "./components/broadcast";
 import { FeatureCard, HoldingCard, ShippedCard, VaultCard } from "./components/feature_card";
 import { SandboxPanel } from "./components/sandbox_panel";
 import { SubmitModal } from "./components/submit_modal";
@@ -31,6 +34,7 @@ const INITIAL_COINS = 5;
 const COIN_REFILL_MS = 2 * 60 * 1000; // 2 minutes
 const TOAST_DURATION_MS = 4500;
 const DEBOUNCE_MS = 350;
+const BROADCAST_CAP = 50; // R35: max retained broadcast messages
 
 // Which statuses belong to which view — used to filter Realtime events (R15)
 const VIEW_STATUSES: Record<View, ReadonlySet<Status>> = {
@@ -91,6 +95,27 @@ function formatCountdown(ms: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// R33: Map a BroadcastEvent to the ticker's BroadcastMessage shape
+// ---------------------------------------------------------------------------
+
+const AGENT_ICONS: Record<string, string> = {
+  Guardagent: "🛡️",
+  "PM Agent": "🔮",
+  "Architect Agent": "📐",
+  "Janitor Agent": "🧹",
+  "Ship Agent": "🚀",
+};
+
+function mapBroadcastEvent(event: BroadcastEvent): BroadcastMessage {
+  return {
+    icon: AGENT_ICONS[event.agent_name] ?? "🤖",
+    agent: event.agent_name,
+    text: event.message,
+    success: event.phase === "deployed" ? true : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -142,6 +167,9 @@ export function AppShell(): JSX.Element {
 
   // -- Holding count for tab badge (R4) --
   const [holdingCount, setHoldingCount] = useState(0);
+
+  // -- Broadcast messages (R32–R35) --
+  const [broadcastMessages, setBroadcastMessages] = useState<BroadcastMessage[]>([]);
 
   // =========================================================================
   // Toast helper (R27)
@@ -276,6 +304,23 @@ export function AppShell(): JSX.Element {
   }, []);
 
   // =========================================================================
+  // R32: Load broadcast event tail on mount
+  // =========================================================================
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await listBroadcastEvents(BROADCAST_CAP);
+      if (!cancelled && res.ok && res.data.length > 0) {
+        setBroadcastMessages(res.data.map(mapBroadcastEvent));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // =========================================================================
   // Vault search debounce (R7)
   // =========================================================================
 
@@ -301,7 +346,7 @@ export function AppShell(): JSX.Element {
   }, []);
 
   // =========================================================================
-  // Realtime subscription (R12–R15, R18, R25)
+  // Realtime subscription (R12–R15, R18, R25, R32)
   // =========================================================================
 
   // Keep a ref to the current view so the subscription handler can read it
@@ -436,6 +481,19 @@ export function AppShell(): JSX.Element {
         // R18: check children for unlock
         // (children come via insert, not update, so this is mainly for
         // the parent row update that might carry updated child data)
+      },
+
+      // R32: append live broadcast events to the ticker
+      onBroadcastEvent: (row) => {
+        const msg = mapBroadcastEvent(row);
+        setBroadcastMessages((prev) => {
+          const next = [...prev, msg];
+          // R35: cap at BROADCAST_CAP, drop oldest
+          if (next.length > BROADCAST_CAP) {
+            return next.slice(next.length - BROADCAST_CAP);
+          }
+          return next;
+        });
       },
     });
 
@@ -636,12 +694,23 @@ export function AppShell(): JSX.Element {
   // =========================================================================
 
   const handleReboot = useCallback(
-    (id: string) => {
-      // R31: move to VOTING in local state only — no api_client call
-      setFeatures((prev) => prev.filter((f) => f.id !== id));
-      showToast(
-        "⚡ Rebooted! A fresh 30-day VOTING window has started.",
-      );
+    async (id: string) => {
+      // R31: the reboot persists (US-16). Only drop the row from the Vault once
+      // the server has actually moved it — otherwise a failed call would leave
+      // the visitor believing an idea was revived when it was not.
+      const result = await rebootFeature(id);
+      if (result.ok) {
+        setFeatures((prev) => prev.filter((f) => f.id !== id));
+        showToast("⚡ Rebooted! A fresh 30-day VOTING window has started.");
+        return;
+      }
+      if (result.status === 422) {
+        // Another visitor revived it first — a race, not a failure.
+        setFeatures((prev) => prev.filter((f) => f.id !== id));
+        showToast("⚡ Already back on the board — someone beat you to it!");
+        return;
+      }
+      showToast(result.message);
     },
     [showToast],
   );
@@ -791,8 +860,11 @@ export function AppShell(): JSX.Element {
 
   return (
     <div className="app">
-      {/* R1: Broadcast chyron */}
-      <Broadcast onSuccessPhase={handleBroadcastSuccess} />
+      {/* R1: Broadcast chyron — R34: leave messages unset when empty */}
+      <Broadcast
+        messages={broadcastMessages.length > 0 ? broadcastMessages : undefined}
+        onSuccessPhase={handleBroadcastSuccess}
+      />
 
       {/* R1, R2: Masthead */}
       <header className="masthead">

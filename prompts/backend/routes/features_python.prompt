@@ -114,11 +114,22 @@ R34 (MUST): Return **every** field of the `Feature` schema on every feature in e
 R35 (MUST NOT): Widen that projection to include `author_id`. R6 still holds: the full Feature schema is the target, and `author_id` is not in it.
 R36 (MUST): Resolve `shipped_version` and `shipped_at` from the `feature_shipped_meta` view rather than from `feature_requests`, which has no such columns. The view's own columns are `feature_id, version, preview_url, deployed_at` — **`version` populates `shipped_version` and `deployed_at` populates `shipped_at`**. Selecting the wire names straight from the view raises `42703: column does not exist`; that is not a hypothetical, it is what a previous generation did. They are null for anything that has not shipped.
 R37 (MUST): Compute `viewer_has_voted` per row from `feature_votes` for the identified viewer, in **one** query for the whole page rather than one per row, and return `false` for an anonymous reader rather than null. It is what stops a returning visitor being invited to click a control that will answer `409`; defaulting it to false for everyone makes the board lie to exactly the people who already participated.
-R39 (MUST): Map the four views to statuses exactly: `pipeline` → `VOTING, CONSOLIDATING, IN_SPRINT, SPLIT`; `shipped` → `COMPILED`; `holding` → `POSTPONED_CONFLICT`; `vault` → `ARCHIVED`. A `SPLIT` parent belongs on the **pipeline**: its children are open for voting and the unlock tree is a pipeline interaction. Filing it under holding tells the community their idea was blocked when in fact it was broken into parts they can vote for — the opposite message. This mapping has already drifted once during a regeneration, unpinned, and no rule caught it.
+R39 (MUST): Map the four views to statuses exactly: `pipeline` → `VOTING, CONSOLIDATING, IN_SPRINT, SPLIT, COMPILED`; `shipped` → `COMPILED`; `holding` → `POSTPONED_CONFLICT`; `vault` → `ARCHIVED`. A `SPLIT` parent belongs on the **pipeline**: its children are open for voting and the unlock tree is a pipeline interaction. Filing it under holding tells the community their idea was blocked when in fact it was broken into parts they can vote for — the opposite message. This mapping has already drifted once during a regeneration, unpinned, and no rule caught it.
+R39a (MUST): **Derive** the set of values the `status` filter accepts from the pipeline view's own status list rather than maintaining a second literal. Two hand-kept sets drift: the filter set was left at `VOTING, CONSOLIDATING, IN_SPRINT` while the view gained `SPLIT`, so the board's own "🚀 AI Evolving" chip answered `400 Unknown status value` — a filter the product ships, refused by the endpoint that ships it.
+R39b (MUST): Show a `COMPILED` feature on the pipeline only inside the **48-hour celebration window** after its deploy, and on the shipped view forever. `schema.sql` describes exactly this window, and it is the moment a voter sees the thing they asked for arrive. A `COMPILED` row with no deployment behind it is outside the window, because nothing actually shipped.
+R39c (MUST): Apply that window **inside the query**, never by filtering the page after it is fetched. A post-fetch filter returns fewer than `limit` rows whenever an expired row occupied a slot, and the shortfall compounds with every page — pagination quietly stops being able to fill a page. Because `deployed_at` lives in `feature_shipped_meta` and PostgREST cannot embed that view into `feature_requests` (the link is a jsonb array, not a foreign key), read the celebrating ids first and constrain the main query with them: `or(status.neq.COMPILED,id.in.(…))` when any are celebrating, and a plain `status.neq.COMPILED` when none are — an empty `id.in.()` is rejected by PostgREST. Repeated `or=` parameters compose as AND, so this sits alongside the keyset-pagination filter without interfering with it.
 R38 (MUST): Apply R34, R36, and R37 to `GET /api/features/{feature_id}` and to `/api/features/mine` as well. One shape means one renderer — a card that carries its explanation on the board but loses it in the author's own tray is the kind of inconsistency that gets fixed by adding a second code path.
 </contract_rules>
 
 <pdd>
+**The celebration window cannot be a join.** `Feature.shipped_version`/`shipped_at` come from
+`feature_shipped_meta`, which flattens `deployments.shipped_feature_ids` — a jsonb array. PostgREST
+resource embedding needs a foreign key, so there is nothing to embed and no way to express
+"COMPILED and deployed within 48 hours" as a single filter on `feature_requests`. Two round-trips is
+the cost of that schema shape, and the first one is cheap: it returns one row per feature deployed in
+the last two days.
+
+
 Scope decision for the MVP demo, deliberately taken: **screening outcomes are not reported.**
 A pending record is written at pitch time with a TTL and is never updated again. If the pitch
 passes it becomes a board row and R17 hides the stale pending twin; if it is rejected or merged
@@ -187,4 +198,7 @@ R36: docs/user_stories/story__preview_the_shipped_feature.md
 R37: docs/user_stories/story__upvote_a_feature.md
 R38: docs/user_stories/story__track_my_pitches.md
 R39: docs/user_stories/story__browse_the_pipeline_board.md
+R39a: docs/user_stories/story__browse_the_pipeline_board.md
+R39b: docs/user_stories/story__preview_the_shipped_feature.md
+R39c: docs/user_stories/story__browse_the_pipeline_board.md
 </coverage>

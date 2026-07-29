@@ -9,16 +9,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import type { Feature } from './api_client';
+import type { BroadcastEvent, Feature } from './api_client';
 
 const listFeatures = vi.fn();
 const upvote = vi.fn();
 const createFeature = vi.fn();
+const rebootFeature = vi.fn();
+const listBroadcastEvents = vi.fn(
+  async (..._a: unknown[]): Promise<{ ok: true; data: BroadcastEvent[] }> => ({ ok: true, data: [] }),
+);
 const subscribe = vi.fn();
 const unsubscribe = vi.fn();
 let handlers: {
   onFeatureInsert?: (r: Feature) => void;
   onFeatureUpdate?: (r: Feature) => void;
+  onBroadcastEvent?: (r: BroadcastEvent) => void;
 } = {};
 
 vi.mock('./api_client', async () => {
@@ -26,6 +31,8 @@ vi.mock('./api_client', async () => {
     listFeatures: (...a: unknown[]) => listFeatures(...a),
     upvote: (...a: unknown[]) => upvote(...a),
     createFeature: (...a: unknown[]) => createFeature(...a),
+    listBroadcastEvents: (...a: unknown[]) => listBroadcastEvents(...a),
+    rebootFeature: (...a: unknown[]) => rebootFeature(...a),
     getFeature: vi.fn(),
     getMyPitches: vi.fn(),
     ensureSession: vi.fn(async () => 'tok'),
@@ -395,5 +402,116 @@ describe('R5b — stage chips multi-select', () => {
     await userEvent.click(chip(/^all$/i));
     expect(chip(/voting/i).className).not.toContain('is-active');
     expect(chip(/^all$/i).className).toContain('is-active');
+  });
+});
+
+// ===========================================================================
+// R32–R35 — the chyron shows the real pipeline (US-11)
+// ===========================================================================
+
+describe('R32 — the ticker is fed from the live feed', () => {
+  it('loads the recent tail on mount', async () => {
+    listBroadcastEvents.mockResolvedValue({
+      ok: true,
+      data: [
+        { id: 'b-1', phase: 'compiling', agent_name: 'Ship Agent', message: 'Compiling the winner…', created_at: '2026-07-29T00:00:00Z' },
+      ],
+    });
+    render(<AppShell />);
+    await waitFor(() => expect(listBroadcastEvents).toHaveBeenCalled());
+    expect(await screen.findByText(/Compiling the winner/)).toBeInTheDocument();
+  });
+
+  it('appends a row arriving over Realtime', async () => {
+    listBroadcastEvents.mockResolvedValue({ ok: true, data: [] });
+    render(<AppShell />);
+    await waitFor(() => expect(listBroadcastEvents).toHaveBeenCalled());
+
+    handlers.onBroadcastEvent?.({
+      id: 'b-2', phase: 'architecting', agent_name: 'Architect Agent',
+      message: 'Checking the blueprint…', created_at: '2026-07-29T00:01:00Z',
+    });
+
+    expect(await screen.findByText(/Checking the blueprint/)).toBeInTheDocument();
+  });
+});
+
+describe('R34 — a quiet pipeline still has a chyron', () => {
+  it('falls back to the scripted strip when nothing has happened', async () => {
+    listBroadcastEvents.mockResolvedValue({ ok: true, data: [] });
+    const { container } = render(<AppShell />);
+    await waitFor(() => expect(listFeatures).toHaveBeenCalled());
+    // The strip is part of the frozen layout — it must never render empty.
+    expect(container.querySelector('.broadcast-msg')!.textContent!.trim().length).toBeGreaterThan(0);
+  });
+});
+
+describe('R33 — a deployed row reads as the payoff', () => {
+  it('marks a deploy as the success phase', async () => {
+    listBroadcastEvents.mockResolvedValue({
+      ok: true,
+      data: [
+        { id: 'b-3', phase: 'deployed', agent_name: 'Ship Agent', message: 'Shipped to the sandbox!', created_at: '2026-07-29T00:02:00Z' },
+      ],
+    });
+    const { container } = render(<AppShell />);
+    await waitFor(() => expect(listBroadcastEvents).toHaveBeenCalled());
+    await screen.findByText(/Shipped to the sandbox/);
+    expect(container.querySelector('.broadcast-msg')!.className).toContain('is-success');
+  });
+});
+
+// ===========================================================================
+// R31 — the reboot persists now (US-16)
+// ===========================================================================
+
+describe('R31 — reboot goes to the server', () => {
+  const archived = () =>
+    feature({ id: 'v-1', title: '3D animated habit mascot', status: 'ARCHIVED' });
+
+  async function openVault() {
+    // The reboot control lives on VaultCard, which only the Vault tab renders.
+    listFeatures.mockResolvedValue(okBoard([archived()]));
+    render(<AppShell />);
+    await waitFor(() => expect(listFeatures).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole('button', { name: /vault/i }));
+    await screen.findByText('3D animated habit mascot');
+  }
+
+  it('calls the endpoint rather than only editing local state', async () => {
+    rebootFeature.mockResolvedValue({ ok: true, data: { ...archived(), status: 'VOTING' } });
+    await openVault();
+    await userEvent.click(screen.getByRole('button', { name: /reboot request/i }));
+    expect(rebootFeature).toHaveBeenCalledWith('v-1');
+  });
+
+  it('drops the row from the Vault and confirms', async () => {
+    rebootFeature.mockResolvedValue({ ok: true, data: { ...archived(), status: 'VOTING' } });
+    await openVault();
+    await userEvent.click(screen.getByRole('button', { name: /reboot request/i }));
+    await waitFor(() =>
+      expect(screen.queryByText('3D animated habit mascot')).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText(/Rebooted/i)).toBeInTheDocument();
+  });
+
+  it('keeps the row in the Vault when the write fails', async () => {
+    // Pretending it moved would tell the visitor an idea was revived when it was not.
+    rebootFeature.mockResolvedValue({
+      ok: false, status: 500, code: 'internal_error', message: 'Something went wrong.',
+    });
+    await openVault();
+    await userEvent.click(screen.getByRole('button', { name: /reboot request/i }));
+    await waitFor(() => expect(rebootFeature).toHaveBeenCalled());
+    expect(screen.getByText('3D animated habit mascot')).toBeInTheDocument();
+  });
+
+  it('treats 422 as a race, not a failure', async () => {
+    rebootFeature.mockResolvedValue({
+      ok: false, status: 422, code: 'not_archived', message: 'not archived',
+    });
+    await openVault();
+    await userEvent.click(screen.getByRole('button', { name: /reboot request/i }));
+    expect(await screen.findByText(/beat you to it/i)).toBeInTheDocument();
   });
 });

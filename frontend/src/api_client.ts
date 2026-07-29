@@ -58,6 +58,15 @@ export interface PendingPitch {
   submitted_at: string;
 }
 
+// R22, R24: BroadcastEvent — one ticker line, unreshaped from event_relay
+export interface BroadcastEvent {
+  id: string;
+  phase: string;
+  agent_name: string;
+  message: string;
+  created_at: string;
+}
+
 // R4: Normalised result — expected failures are values, not exceptions.
 export type ApiResult<T> =
   | { ok: true; data: T }
@@ -312,20 +321,66 @@ export async function upvote(
 }
 
 // ---------------------------------------------------------------------------
-// R16–R19: Realtime subscription
+// R26: rebootFeature — the way out of the Vault (US-16)
+// ---------------------------------------------------------------------------
+
+export async function rebootFeature(id: string): Promise<ApiResult<Feature>> {
+  // A write, so single-shot (R7). A 422 `not_archived` means another visitor
+  // revived it first — a race, not a failure to hide from the caller.
+  return apiFetch<Feature>(
+    `/api/features/${encodeURIComponent(id)}/reboot`,
+    { method: "POST", auth: true },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// R23: listBroadcastEvents — recent ticker tail via Supabase, oldest-last
+// ---------------------------------------------------------------------------
+
+export async function listBroadcastEvents(
+  limit?: number,
+): Promise<ApiResult<BroadcastEvent[]>> {
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("broadcast_events")
+      .select("id, phase, agent_name, message, created_at")
+      .order("created_at", { ascending: true })
+      .limit(limit ?? 50);
+
+    if (error) {
+      return fail(
+        0,
+        error.code ?? "supabase_error",
+        error.message ?? "Failed to load broadcast events.",
+      );
+    }
+
+    return { ok: true, data: (data ?? []) as BroadcastEvent[] };
+  } catch (err: unknown) {
+    const msg =
+      err instanceof Error ? err.message : "A network error occurred. Please try again.";
+    return fail(0, "network_error", msg);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R16–R19, R22, R24, R25: Realtime subscription
 // ---------------------------------------------------------------------------
 
 export function subscribe(handlers: {
   onFeatureInsert?: (row: Feature) => void;
   onFeatureUpdate?: (row: Feature) => void;
+  onBroadcastEvent?: (row: BroadcastEvent) => void;
 }): () => void {
   const sb = getSupabase();
 
   let channel: RealtimeChannel | null = null;
 
-  // Build channel with both INSERT and UPDATE listeners (R16)
+  // Build channel with INSERT and UPDATE listeners for feature_requests (R16)
+  // and INSERT listener for broadcast_events (R22)
   channel = sb
-    .channel("feature_requests_changes")
+    .channel("realtime_changes")
     .on(
       "postgres_changes" as "postgres_changes",
       { event: "INSERT", schema: "public", table: "feature_requests" },
@@ -343,6 +398,17 @@ export function subscribe(handlers: {
       (payload) => {
         if (handlers.onFeatureUpdate && payload.new) {
           handlers.onFeatureUpdate(payload.new as Feature);
+        }
+      },
+    )
+    .on(
+      "postgres_changes" as "postgres_changes",
+      { event: "INSERT", schema: "public", table: "broadcast_events" },
+      (payload) => {
+        // R22: broadcast_events INSERT — the chyron's live feed
+        // R24: do NOT reshape the broadcast row
+        if (handlers.onBroadcastEvent && payload.new) {
+          handlers.onBroadcastEvent(payload.new as BroadcastEvent);
         }
       },
     )

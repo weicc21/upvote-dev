@@ -29,6 +29,7 @@ This module DOES NOT resolve or validate the preview URL; `api_client` owns conf
 </non_responsibilities>
 
 <vocabulary>
+Recent: of the ticker tail, the newest handful of broadcast rows — enough to fill the strip on load, not a history.
 **View** — one of the four tabs: `pipeline`, `shipped`, `holding`, `vault`. Each is a different question about the same board, answered by the same endpoint.
 **Live** — the board follows the pipeline without a reload, because the daemon's inserts and the vote counter's updates both arrive over Realtime.
 **Pitch Coin** — one unit of the daily submission allowance, held as a client-side counter. The backend's `429` is the only real limit.
@@ -76,15 +77,18 @@ R27 (MUST): Render at most one toast at a time in a `toast` with `role="status"`
 R28 (MUST NOT): Block first render on the anonymous session. Board reads are anonymous, so the feed must paint before any auth work completes — the session is only needed when someone votes.
 R29 (MUST): Give the feed a landmark role and an accessible name, and announce loading and error states to assistive technology rather than only styling them.
 R30 (MUST NOT): Introduce a CSS framework, UI kit, or state-management library. Component state and context are sufficient at this size, and the design guide forbids the first two outright.
-R31 (MUST): Handle a Vault reboot by moving the request to `VOTING` in local state and confirming it with the `⚡ Rebooted! A fresh 30-day VOTING window has started.` toast. The row leaving the tab the visitor is looking at is not by itself legible as success, so the toast is the confirmation. No endpoint persists this yet (US-16) — the handler MUST NOT call `api_client` for it, and MUST NOT be written to look as though the change survives a reload.
+R32 (MUST): Feed the chyron the live pipeline: load the recent tail with `api_client.listBroadcastEvents` on mount, append every `onBroadcastEvent` row from the same subscription opened in R12, and pass the result to `Broadcast` as `messages`. Until this is wired the strip cycles its scripted fallback, and the product's central claim — that you can watch the agents work — is an animation.
+R33 (MUST): Map a broadcast row to the ticker's shape by agent name, choosing the icon from the agent (`Guardagent` 🛡️, `PM Agent` 🔮, `Architect Agent` 📐, `Janitor Agent` 🧹, `Ship Agent` 🚀) and marking a row `success` when its phase is `deployed`. The relay already translated internal phases into public ones; this is presentation, not a second translation.
+R34 (MUST): Leave `messages` unset while the list is empty, so `Broadcast` falls back to its own script rather than rendering an empty strip. A quiet pipeline is normal and the chyron is part of the frozen layout.
+R35 (MUST): Cap the retained list at a few dozen rows, dropping the oldest. The ticker is a window on what is happening now, and an unbounded array grows for as long as the tab is open.
+R31 (MUST): Handle a Vault reboot through `api_client.rebootFeature`, removing the row from the Vault on success and confirming with the `⚡ Rebooted! A fresh 30-day VOTING window has started.` toast. The row leaving the tab the visitor is looking at is not by itself legible as success, so the toast is the confirmation. It **persists** now (US-16): a `422 not_archived` means another visitor revived it first, which is a race worth reporting calmly rather than an error, and any other failure MUST leave the row in the Vault rather than pretending it moved.
 </contract_rules>
 
 <pdd>
-**The vault reboot is client-side only (US-16).** `VaultCard` renders the control and this shell
-moves the row to `VOTING` locally and toasts, but no endpoint persists it — a reload puts the
-feature back in the vault. That split is deliberate and documented in the story: the UI half is
-what stops the Vault tab reading as a dead end, and the write lands with US-07, where archiving and
-voting windows acquire real rules. Do not present it as durable.
+**The vault reboot now persists (US-16).** `POST /api/features/{id}/reboot` moves the row back to
+`VOTING`, resets `created_at`, restarts the count at 1 with the reviver's vote, and clears the old
+votes. The shell's job is to remove the row from the Vault and confirm; the server owns the rest.
+A `422 not_archived` is the two-visitors race, not a failure.
 
 **Pagination is not wired.** `listFeatures` returns `next_cursor` and this shell ignores it, so each
 tab shows the first page. The cursor is already threaded through the client, so it is a UI change
@@ -145,4 +149,8 @@ R28: docs/user_stories/story__browse_the_pipeline_board.md
 R29: frontend/src/app_shell.test.tsx
 R30: TODO — add a check asserting no UI or state library is imported
 R31: docs/user_stories/story__reboot_an_archived_request.md
+R32: docs/user_stories/story__watch_the_agents_work.md
+R33: docs/user_stories/story__watch_the_agents_work.md
+R34: docs/user_stories/story__watch_the_agents_work.md
+R35: docs/user_stories/story__watch_the_agents_work.md
 </coverage>

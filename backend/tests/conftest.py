@@ -37,6 +37,10 @@ class FakeQuery:
         self._payload = payload
         return self
 
+    def delete(self, **_k: Any) -> FakeQuery:
+        self._op = "delete"
+        return self
+
     def update(self, payload: Any, **_k: Any) -> FakeQuery:
         self._op = "update"
         self._payload = payload
@@ -53,6 +57,14 @@ class FakeQuery:
     def is_(self, col: str, val: Any) -> FakeQuery:
         # PostgREST spells SQL NULL as the string "null"
         self._filters[col] = ("is", None if str(val).lower() == "null" else val)
+        return self
+
+    def gte(self, col: str, val: Any) -> FakeQuery:
+        self._filters[col] = ("gte", val)
+        return self
+
+    def lte(self, col: str, val: Any) -> FakeQuery:
+        self._filters[col] = ("lte", val)
         return self
 
     def neq(self, col: str, val: Any) -> FakeQuery:
@@ -96,6 +108,11 @@ class FakeQuery:
             written = self._payload if isinstance(self._payload, list) else [self._payload]
             self._store.rows.setdefault(self._table, []).extend(written)
             return type("Resp", (), {"data": list(written)})()
+        if self._op == "delete":
+            table = self._store.rows.get(self._table, [])
+            doomed = self._apply_filters(table)
+            self._store.rows[self._table] = [r for r in table if r not in doomed]
+            return type("Resp", (), {"data": [dict(r) for r in doomed]})()
         if self._op == "update":
             matched = self._apply_filters(self._store.rows.get(self._table, []))
             for row in matched:
@@ -126,6 +143,10 @@ class FakeQuery:
                 out = [r for r in out if r.get(col) is val]
             elif op == "neq":
                 out = [r for r in out if r.get(col) != val]
+            elif op == "gte":
+                out = [r for r in out if str(r.get(col) or "") >= str(val)]
+            elif op == "lte":
+                out = [r for r in out if str(r.get(col) or "") <= str(val)]
         return out
 
 

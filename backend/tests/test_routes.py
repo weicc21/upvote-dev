@@ -513,3 +513,112 @@ async def test_r39_a_split_parent_is_a_pipeline_card_not_a_held_one(
 
     holding = make_client().get("/api/features?view=holding").json()
     assert PARENT_ID not in {f["id"] for f in holding["features"]}
+
+
+# ==========================================================================
+# R39a / R39b — the filter set and the celebration window
+# ==========================================================================
+
+def test_r39a_every_chip_the_board_ships_is_accepted(make_client, fake_supabase) -> None:
+    """The board's own filter chips must not be refused by its own endpoint.
+
+    This regressed once: the view gained SPLIT while the validation set stayed
+    behind, so "🚀 AI Evolving" answered 400 Unknown status value.
+    """
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = []
+    for status in ["VOTING", "CONSOLIDATING", "IN_SPRINT", "SPLIT", "COMPILED"]:
+        r = make_client().get(f"/api/features?view=pipeline&status={status}")
+        assert r.status_code == 200, f"the {status} chip was refused: {r.json()}"
+
+
+def test_r39a_the_filter_set_is_derived_from_the_view(make_client, fake_supabase) -> None:
+    """Two hand-kept sets drift; one derived set cannot."""
+    from backend.routes import features as F
+
+    assert F._PIPELINE_STATUSES == set(F._VIEW_STATUSES["pipeline"])
+
+
+def test_r39a_an_unknown_status_is_still_refused(make_client, fake_supabase) -> None:
+    r = make_client().get("/api/features?view=pipeline&status=NOT_A_STATUS")
+    assert r.status_code == 400
+
+
+def _shipped(hours_ago: float) -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    return {
+        "feature_id": FID,
+        "version": "v0.4.1",
+        "deployed_at": (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(),
+    }
+
+
+def test_r39b_a_freshly_shipped_feature_celebrates_on_the_pipeline(
+    make_client, fake_supabase
+) -> None:
+    """The moment a voter sees the thing they asked for arrive."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID, status="COMPILED")]
+    fake_supabase.rows["feature_shipped_meta"] = [_shipped(2)]
+    body = make_client().get("/api/features?view=pipeline").json()
+    assert FID in {f["id"] for f in body["features"]}
+
+
+def test_r39b_an_old_shipped_feature_leaves_the_pipeline(make_client, fake_supabase) -> None:
+    """It lives on the Shipped tab forever, but stops crowding the board."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID, status="COMPILED")]
+    fake_supabase.rows["feature_shipped_meta"] = [_shipped(72)]
+    body = make_client().get("/api/features?view=pipeline").json()
+    assert FID not in {f["id"] for f in body["features"]}
+
+
+def test_r39b_compiled_with_no_deployment_never_celebrates(make_client, fake_supabase) -> None:
+    """COMPILED with nothing deployed behind it has not actually shipped."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID, status="COMPILED")]
+    fake_supabase.rows["feature_shipped_meta"] = []
+    body = make_client().get("/api/features?view=pipeline").json()
+    assert FID not in {f["id"] for f in body["features"]}
+
+
+def test_r39b_the_shipped_tab_keeps_it_forever(make_client, fake_supabase) -> None:
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID, status="COMPILED")]
+    fake_supabase.rows["feature_shipped_meta"] = [_shipped(24 * 365)]
+    body = make_client().get("/api/features?view=shipped").json()
+    assert FID in {f["id"] for f in body["features"]}
+
+
+def test_r39b_a_full_page_is_returned_even_when_shipped_rows_expire(
+    make_client, fake_supabase
+) -> None:
+    """The celebration window is applied by the database, not after the fetch.
+
+    Filtering a fetched page silently returns fewer than `limit` rows whenever
+    an expired COMPILED row occupied a slot — and that shortfall compounds with
+    every page of deep pagination.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    stale = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+    rows = [full_row(id=f"0000000{i}-0000-4000-8000-00000000000{i}", upvotes=100 - i)
+            for i in range(5)]
+    # Two of them shipped long ago and must not occupy a slot on the pipeline.
+    rows[1]["status"] = "COMPILED"
+    rows[3]["status"] = "COMPILED"
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = rows
+    fake_supabase.rows["feature_shipped_meta"] = [
+        {"feature_id": rows[1]["id"], "version": "v1", "deployed_at": stale},
+        {"feature_id": rows[3]["id"], "version": "v1", "deployed_at": stale},
+    ]
+
+    body = make_client().get("/api/features?view=pipeline&limit=3").json()
+    ids = [f["id"] for f in body["features"]]
+    assert len(ids) == 3, f"page was short-changed by expired rows: {len(ids)}"
+    assert rows[1]["id"] not in ids and rows[3]["id"] not in ids
+
+
+def test_r39b_the_database_does_the_excluding(make_client, fake_supabase) -> None:
+    """A `.neq` or `.or_` must reach the query — not a post-fetch list comprehension."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID)]
+    fake_supabase.rows["feature_shipped_meta"] = []
+    make_client().get("/api/features?view=pipeline")
+    ops = [c for c in fake_supabase.calls if c["table"] == TABLE_FEATURE_REQUESTS]
+    assert any("status" in c["filters"] for c in ops), "no status constraint reached the query"

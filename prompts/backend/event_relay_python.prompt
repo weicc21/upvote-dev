@@ -1,0 +1,96 @@
+<pdd-reason>The bridge that makes the pipeline visible. Agents shout into Redis; the board can only hear Postgres. Without this the ticker is a scripted animation and the product's central claim — that you can watch the agents work — is theatre.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"AgentEvent","signature":"@dataclass(frozen=True) class AgentEvent","returns":"phase: BroadcastPhase; agent_name: str; message: str"},
+  {"name":"translate","signature":"def translate(payload: Mapping[str, Any]) -> AgentEvent | None","returns":"the broadcast row for one agent message, or None when it should not be relayed"},
+  {"name":"relay_once","signature":"async def relay_once(raw: str | bytes, supabase: AsyncClient) -> bool","returns":"True when a row was written; False when the message was dropped"},
+  {"name":"run_relay","signature":"async def run_relay(redis: Redis, supabase: AsyncClient, *, stop: asyncio.Event | None = None) -> None","returns":"subscribe and relay until stopped"},
+  {"name":"main","signature":"def main() -> None","returns":"entry point — build clients, run the relay until interrupted"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+
+Implement `backend/event_relay.py`. It subscribes to the Redis `agent_events` channel and writes
+`broadcast_events` rows, which Supabase Realtime fans out to every open board.
+
+<responsibility>
+Translate internal agent chatter into public ticker copy, and put it somewhere Realtime can deliver it.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT decide anything, judge anything, or call a model. It relays what agents already said.
+This module DOES NOT push to browsers. Supabase Realtime does that; this only writes the row.
+This module DOES NOT open an SSE stream, a WebSocket, or a streaming HTTP route. Realtime is the only live-update mechanism in this system.
+This module DOES NOT read or write `feature_requests`. A ticker line is not a state change.
+This module DOES NOT prune `broadcast_events`; retention is a scheduled concern elsewhere.
+</non_responsibilities>
+
+<vocabulary>
+Valid: of a payload, JSON that decodes to an object carrying a non-empty `message` and a `phase` this module's table knows. Anything else is dropped rather than guessed at.
+Agent event: a JSON message published to the Redis `agent_events` channel by the daemon, the sprint service or the compiler. Its `phase` is **internal vocabulary** — values like `sprint`, `compile_started`, `compile_failed`.
+Broadcast phase: the `broadcast_phase` Postgres enum — `screening`, `synthesizing`, `architecting`, `compiling`, `deployed`. This is **public vocabulary**, and the only thing the ticker may carry.
+Micro-copy: one short human-readable line. Never a log excerpt, never a stack trace, never pitch text.
+Relayed: written to `broadcast_events`. A message that cannot be translated is dropped, not guessed at.
+</vocabulary>
+
+<capabilities>
+- MAY subscribe to Redis pub/sub and insert into `broadcast_events`.
+- MUST NOT call a model, make an HTTP request, or touch any other table.
+- MUST NOT raise out of the relay loop.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Subscribe to the Redis `agent_events` channel with pub/sub. The agents `publish` to it; a queue read such as `BRPOP` would consume nothing and the ticker would stay silent forever.
+R2 (MUST): Translate the event's **internal** phase onto the `broadcast_phase` enum through an explicit mapping, and MUST NOT pass it through unchanged. The agents publish `sprint`, `compile_started`, `compile_succeeded` and `compile_failed`; none of those is a valid enum value, so a passthrough insert fails on every message and the ticker never moves. This is the single reason this translation step exists.
+R3 (MUST): Map, at minimum: anything screening-related to `screening`; dedup and PM work to `synthesizing`; sprint selection, holds and architect verdicts to `architecting`; every compile phase to `compiling`; deploys to `deployed`.
+R4 (MUST): Supply `agent_name` from that same mapping — `broadcast_events.agent_name` is `NOT NULL` and the published payload carries no agent field. Use the names the community already sees on the ticker: `Guardagent`, `PM Agent`, `Architect Agent`, `Janitor Agent`, `Ship Agent`.
+R5 (MUST): Drop an event whose phase has no mapping, log it at debug, and MUST NOT invent a phase or fall back to a default. A wrong phase is worse than a missing line: it tells the community the wrong agent is working.
+R6 (MUST): Drop a message that is not valid JSON, is not an object, or has no `message`, without raising. Anything can be published to a Redis channel and one malformed message must not end the relay.
+R7 (MUST NOT): Relay pitch content. Take only the `message` field, which agents already write as micro-copy, cap it at a few hundred characters, and MUST NOT include `feature_id`, titles, descriptions, log tails, or any other payload field in the row. The ticker is public and the pitch may be unscreened.
+R8 (MUST NOT): Let one failed insert stop the loop. Log it and carry on: the ticker is decorative and Postgres being briefly unhappy must never take down the process that is also feeding it.
+R9 (MUST): Keep running when Redis drops the connection — reconnect and resubscribe rather than exiting. A relay that dies on the first blip leaves a board that looks alive but never updates, which is worse than one that is visibly down.
+R10 (MUST): Stop cleanly when the injected `stop` event is set, and handle `SIGINT`/`SIGTERM` in `main()`, closing Redis with `aclose()` and never calling `supabase.auth.sign_out()`.
+R11 (MUST): Take both clients as arguments to `run_relay`, and expose `translate` and `relay_once` as pure-enough units, so the whole translation table is testable without Redis, Postgres, or a running loop.
+R12 (MUST): Write exactly one row per relayed event — `phase`, `agent_name`, `message` — using only those columns.
+</contract_rules>
+
+<pdd>
+**The internal/public vocabulary split is the point of this module.** Agents name their own phases
+for their own logs, and the enum names what a visitor sees. Letting agents write the public enum
+directly would couple every agent to the ticker's copy, and the first agent that invented a phase
+would break the board. Translating in one place means a new agent phase costs one line here.
+
+**`sprint` maps to `architecting` rather than to a phase of its own.** The sprint's consequential
+moment is the architect's buildability gate, and the enum has no `sprinting`. Adding one would be a
+Postgres migration for a distinction the community does not make.
+
+**This is a separate process, not part of the API.** It holds a long-lived Redis subscription, which
+does not belong in a request-handling worker, and it needs to keep running when no one is browsing.
+
+**Retention is not handled here.** `broadcast_events` is described as pruned on schedule; this module
+only appends, and the board only ever reads the recent tail.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__watch_the_agents_work.md
+R2: docs/user_stories/story__watch_the_agents_work.md
+R3: docs/user_stories/story__watch_the_agents_work.md
+R4: docs/user_stories/story__watch_the_agents_work.md
+R5: docs/user_stories/story__watch_the_agents_work.md
+R6: TODO — add a test asserting malformed messages are dropped without raising
+R7: docs/user_stories/story__screen_incoming_pitches.md
+R8: TODO — add a test asserting a failed insert does not end the loop
+R9: TODO — add a test asserting the relay resubscribes after a dropped connection
+R10: docs/user_stories/story__watch_the_agents_work.md
+R11: TODO — add a test asserting translate and relay_once run without Redis
+R12: docs/user_stories/story__watch_the_agents_work.md
+</coverage>

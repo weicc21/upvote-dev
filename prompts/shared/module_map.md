@@ -85,6 +85,17 @@ Three things about invoking it:
 `--force` is required in the command: without it pdd asks `Overwrite existing files? [Y/n]` and, with
 no TTY, hangs rather than failing. `--local` keeps execution off the PDD Cloud relay.
 
+## PostgREST behaviours this project relies on
+
+- **Repeated `or=` parameters compose as AND.** `.or_(a).or_(b)` is `(a) AND (b)`, which is what lets
+  the celebration-window filter sit alongside keyset pagination without either clobbering the other.
+- **`id.in.()` with an empty list is rejected.** Branch to a plain `.neq(...)` when the set is empty
+  rather than emitting a degenerate `in`.
+- **`feature_shipped_meta` cannot be embedded.** Resource embedding needs a foreign key; the link
+  from `deployments` to features is a jsonb array, so any query needing `deployed_at` alongside
+  feature rows is two round-trips by construction.
+- **A view's columns are not the wire field names** — see the `feature_shipped_meta` table above.
+
 ## Narrow tables that do NOT carry `feature_id`
 
 | table | columns | notes |

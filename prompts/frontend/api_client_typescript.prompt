@@ -13,7 +13,10 @@
   {"name":"getMyPitches","signature":"async function getMyPitches(): Promise<ApiResult<{pending: PendingPitch[]; features: Feature[]}>>","returns":"GET /api/features/mine"},
   {"name":"createFeature","signature":"async function createFeature(input: {title: string; description: string}): Promise<ApiResult<{feature_id: string; state: 'screening'}>>","returns":"POST /api/features"},
   {"name":"upvote","signature":"async function upvote(id: string): Promise<ApiResult<{feature_id: string; upvotes: number}>>","returns":"POST /api/features/{id}/upvote"},
-  {"name":"subscribe","signature":"function subscribe(handlers: {onFeatureInsert?: (row: Feature) => void; onFeatureUpdate?: (row: Feature) => void}): () => void","returns":"Realtime subscription; returns its own unsubscribe"},
+  {"name":"subscribe","signature":"function subscribe(handlers: {onFeatureInsert?: (row: Feature) => void; onFeatureUpdate?: (row: Feature) => void; onBroadcastEvent?: (row: BroadcastEvent) => void}): () => void","returns":"Realtime subscription; returns its own unsubscribe"},
+  {"name":"rebootFeature","signature":"function rebootFeature(id: string): Promise<ApiResult<Feature>>","returns":"POST /api/features/{id}/reboot — the revived feature, or a typed failure"},
+  {"name":"BroadcastEvent","signature":"interface BroadcastEvent { id: string; phase: string; agent_name: string; message: string; created_at: string }","returns":"one ticker line, as event_relay wrote it"},
+  {"name":"listBroadcastEvents","signature":"function listBroadcastEvents(limit?: number): Promise<ApiResult<BroadcastEvent[]>>","returns":"the recent ticker tail, newest last"},
   {"name":"sandboxUrl","signature":"const sandboxUrl: string | null","returns":"the hosted target app URL for the preview iframe, or null when unset/disallowed"},
   {"name":"ensureSession","signature":"async function ensureSession(): Promise<string | null>","returns":"the caller's access token, creating an anonymous session on first use"}
 ]}}
@@ -33,6 +36,8 @@ This module DOES NOT retry a write, because a retried pitch spends a second coin
 </non_responsibilities>
 
 <vocabulary>
+Complete: of a Realtime row, carrying every field the REST endpoint would return. Postgres sends only the changed row, so a Realtime payload is never complete in that sense.
+Recent: of the ticker tail, the newest handful of `broadcast_events` rows — enough to fill the strip on load, not a history.
 **Seam** — this module. Components import it or receive its functions as props; nothing else in the app performs I/O, and a unit test replaces it wholesale (design guide, rule 7).
 **Normalised result** — the `ApiResult` union. Expected failures are *values*, not exceptions, so a caller cannot forget a `429` the way it can forget a `catch`.
 **Identified, not registered** — an anonymous Supabase session is a real, verifiable identity with no signup. It is what makes "no account setup ceremony" literally true (US-01).
@@ -66,6 +71,11 @@ R17 (MUST): Hand Realtime rows to callbacks in wire shape, unmodified. Because o
 R18 (MUST): Reconnect on connection loss and MUST NOT throw into the caller when the channel drops — the board degrades to stale, never to broken.
 R19 (MUST NOT): Assume a Realtime row is complete. Postgres sends the changed row, not the joined shape the REST endpoint builds, so `children` may be absent on an update — the caller merges it into existing state rather than replacing a parent's children with nothing.
 R20 (MUST): Export `sandboxUrl`, read from `import.meta.env.VITE_SANDBOX_URL`. The target app is hosted, not served locally, so the preview is an external URL — and `app_shell` may not read env itself, which is why it is surfaced here alongside every other piece of configuration.
+R26 (MUST): Expose `rebootFeature` calling `POST /api/features/{id}/reboot` with the session token, returning the revived `Feature`. It is a write, so R7 applies — one attempt, never retried. The endpoint answers `422 not_archived` when the row already moved, which is a normal race with another visitor rather than an error to hide.
+R22 (MUST): Subscribe to INSERT on `broadcast_events` as part of the same channel, exposing `onBroadcastEvent`. That table is what `backend/event_relay.py` writes and Realtime fans out; without this subscription the chyron can only ever show its scripted fallback, and the product's claim that you can watch the agents work stays theatre.
+R23 (MUST): Expose `listBroadcastEvents` reading the recent tail of `broadcast_events` ordered oldest-last, so a board that has just loaded shows what the agents were doing rather than an empty strip until the next event happens to fire.
+R24 (MUST NOT): Reshape a broadcast row. `phase`, `agent_name` and `message` are already public vocabulary — the relay did the translation, and translating again here would put two mappings in the system that can disagree.
+R25 (MUST NOT): Poll `broadcast_events`, open an `EventSource`, or hold a WebSocket of your own. Supabase Realtime is the only live-update mechanism in this system.
 R21 (MUST): Return `null` from `sandboxUrl` unless the value parses as an `https:` URL whose host matches the deployment allowlist (`*.onrender.com` for this deployment). An iframe `src` taken unchecked from configuration is an injection vector — a mistyped or hostile env value would embed an arbitrary origin inside the forum. Prefer showing nothing over embedding an unvetted host.
 </contract_rules>
 
@@ -112,5 +122,10 @@ R17: docs/user_stories/story__browse_the_pipeline_board.md
 R18: TODO — add a test asserting a dropped channel does not throw into the caller
 R19: docs/user_stories/story__browse_the_pipeline_board.md
 R20: docs/user_stories/story__preview_the_shipped_feature.md
+R26: docs/user_stories/story__reboot_an_archived_request.md
+R22: docs/user_stories/story__watch_the_agents_work.md
+R23: docs/user_stories/story__watch_the_agents_work.md
+R24: docs/user_stories/story__watch_the_agents_work.md
+R25: docs/user_stories/story__watch_the_agents_work.md
 R21: docs/user_stories/story__preview_the_shipped_feature.md
 </coverage>

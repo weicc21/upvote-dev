@@ -1,3 +1,6 @@
+<!-- pdd-story-prompts: event_relay_python.prompt, broadcast_typescriptreact.prompt, api_client_typescript.prompt, app_shell_typescriptreact.prompt -->
+<!-- pdd-story-dev-units: event_relay_python.prompt, broadcast_typescriptreact.prompt -->
+
 # User Story: watch_the_agents_work
 
 **ID:** US-11

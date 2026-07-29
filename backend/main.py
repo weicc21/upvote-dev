@@ -22,6 +22,7 @@ from supabase._async.client import create_client
 from backend.deps import ErrorResponse, get_redis, get_supabase
 from backend.routes.features import router as features_router
 from backend.routes.votes import router as votes_router
+from backend.routes.lifecycle import router as lifecycle_router
 from backend.routes.deploy import router as deploy_router
 from shared.config import settings
 
@@ -199,11 +200,13 @@ async def _unhandled_exception(_request: Request, exc: Exception) -> JSONRespons
 
 
 # ---------------------------------------------------------------------------
-# Router registration (R14 — features + votes + deploy)
+# Router registration (R14 — features + votes + lifecycle + deploy)
 # ---------------------------------------------------------------------------
 
 app.include_router(features_router)
 app.include_router(votes_router)
+# Shares the /api/features prefix, as votes does (R14).
+app.include_router(lifecycle_router)
 # No prefix: /api/sandbox and /webhooks/render are absolute, and the
 # webhook deliberately sits outside /api and outside CORS.
 app.include_router(deploy_router)

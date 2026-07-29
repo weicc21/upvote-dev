@@ -22,7 +22,15 @@ so that a good idea that arrived at the wrong moment gets a second run instead o
 - A rebooted request keeps its title, description, author, and history. It is the same idea getting
   another run, not a new pitch, so it must not cost a Pitch Coin or re-enter screening.
 - Its vote count restarts from the reboot rather than resuming an old total, so the new window
-  measures current demand rather than crediting interest from months ago.
+  measures current demand rather than crediting interest from months ago. It restarts at **one** —
+  the vote of whoever revived it — exactly as a fresh pitch starts with its author's vote, and that
+  vote is recorded like any other rather than being a bare number.
+- Rebooting requires an identified user but not the original author. The point is present demand: if
+  only the author could revive an idea, one whose author has moved on stays archived no matter how
+  many people now want it.
+- Rebooting something that is not archived is refused as `not_archived` rather than silently
+  succeeding — the control only ever appears on the Vault, so a request to revive a live feature
+  means the client is out of date.
 
 ## Notes
 
@@ -33,12 +41,11 @@ locally with a toast, but nothing persists: a reload puts the request back in th
 deliberate split, not an oversight — the UI half is what the Vault tab needs to not read as a dead
 end, and it is safe to ship ahead of the write because it touches no other flow.
 
-**The backend half is owed** and lands as a status transition on the features route: an endpoint
-that moves `ARCHIVED` → `VOTING`, resets the voting window and the vote count, and clears prior
-`feature_votes` rows so the new window starts clean. It belongs with US-07, which is where archiving
-and voting windows acquire real rules — reboot cannot define "a fresh 30-day window" before
-something defines the window. Until then the criteria above describing durability are **not met**,
-and this story should be read as one story with a finished front half.
+**The backend half is `POST /api/features/{id}/reboot`**, already declared in the frozen
+`openapi.yaml`: "ARCHIVED -> VOTING; resets created_at and upvotes to 1; no re-enqueue", returning
+the updated `Feature` or `422 not_archived`. Resetting `created_at` is what restarts the window —
+both the "newest" sort and the sprint's decay measure from it, so a revived request is genuinely
+back at the start of the queue rather than instantly stale.
 
 Rebooting is deliberately open to anyone rather than to the original author. The point is present
 demand, not authorship — if only the author can revive an idea, an archived request whose author has

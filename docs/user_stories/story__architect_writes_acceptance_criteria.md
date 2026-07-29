@@ -1,3 +1,6 @@
+<!-- pdd-story-prompts: architect_python.prompt, ingestion_service_python.prompt, sprint_service_python.prompt -->
+<!-- pdd-story-dev-units: architect_python.prompt -->
+
 # User Story: architect_writes_acceptance_criteria
 
 **ID:** US-08
