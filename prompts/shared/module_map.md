@@ -49,6 +49,54 @@ exposes **no** public close in this version — let it be garbage-collected. Nev
 `supabase.auth.sign_out()` to "close" it: that is a network round-trip ending a user session, and
 a service-role client has none.
 
+## Target app layout (`TARGET_PROMPT_DIR`)
+
+`TARGET_PROMPT_DIR` points at a **whole git working tree**, not a prompt folder:
+
+| path | what it is |
+|---|---|
+| `streaks_demo_typescriptreact.prompt` | the blueprint the compiler appends Feature Blocks to (`architect._BLUEPRINT_FILENAME` pins the same name) |
+| `streaks_demo.tsx` | the generated source — the compile output, and the only thing worth hashing |
+| `node_modules/`, `dist/`, `.git/`, `package-lock.json` | present and enormous |
+
+There is no `prompt.md`. Never walk this directory recursively: `rglob("*")` reaches
+`node_modules` and `.git`, which makes any hash both slow and non-deterministic across installs and
+builds. Read the two named files directly.
+
+## Running COMPILE_COMMAND (US-09)
+
+`COMPILE_COMMAND` comes from `.env` and is operator-supplied, e.g.
+`pdd --local --force generate streaks_demo_typescriptreact.prompt --output streaks_demo.tsx`.
+Three things about invoking it:
+
+1. **The compiler injects `PDD_COMMAND_MAX_OUTPUT_TOKENS` into the child environment itself**
+   (`env={**os.environ, ...}`), rather than relying on the operator's shell or on an inline
+   `VAR=value` prefix in the command string. Unset, `llm_invoke` sends no `max_tokens` and inherits
+   the provider ceiling, truncating generated source mid-file — a failure that looks like a broken
+   compile, not a missing variable.
+2. **An inline `VAR=value` prefix only works under a shell.** `shlex.split("VAR=1 pdd …")` makes
+   `VAR=1` into `argv[0]` and raises `FileNotFoundError`. Run the command through a shell so
+   operators can write prefixes, pipelines and `cd x && …`; the env injection in (1) means nothing
+   depends on them doing so.
+3. **`COMPILE_COMMAND` MUST NOT be built from pitch content.** Running it through a shell is safe
+   only while the string is operator-controlled configuration. Nothing a community member typed may
+   ever reach it.
+
+`--force` is required in the command: without it pdd asks `Overwrite existing files? [Y/n]` and, with
+no TTY, hangs rather than failing. `--local` keeps execution off the PDD Cloud relay.
+
+## Narrow tables that do NOT carry `feature_id`
+
+| table | columns | notes |
+|---|---|---|
+| `build_logs` | `id, version_hash, synthesis_summary, status, completed_at` | build diagnostics keyed by build, **not** by feature; pruned on schedule |
+| `decision_log` | `id, feature_id, batch_id, phase, agent, decision, model_version, created_at` | the permanent, feature-linked governance record |
+
+Inserting `feature_id` or a `log_tail` into `build_logs` raises
+`PGRST204: Could not find the '<col>' column of 'build_logs' in the schema cache`. If a build needs
+to be traced back to a feature, that link belongs in `decision_log`; `build_logs.synthesis_summary`
+is the only free-text field and it is bounded.
+
 ## Database views
 
 `public.feature_shipped_meta` — one row per shipped feature, its most recent deployment.

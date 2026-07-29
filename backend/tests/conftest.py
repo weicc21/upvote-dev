@@ -90,7 +90,17 @@ class FakeQuery:
             exc = self._store.insert_raises.get(self._table)
             if exc is not None:
                 raise exc
-            return type("Resp", (), {"data": [self._payload]})()
+            # Persist, like a database. A fake whose inserts vanish makes a test
+            # unable to ask "did this row actually get written?", which is the
+            # question most integration bugs hide behind.
+            written = self._payload if isinstance(self._payload, list) else [self._payload]
+            self._store.rows.setdefault(self._table, []).extend(written)
+            return type("Resp", (), {"data": list(written)})()
+        if self._op == "update":
+            matched = self._apply_filters(self._store.rows.get(self._table, []))
+            for row in matched:
+                row.update(self._payload or {})
+            return type("Resp", (), {"data": [dict(r) for r in matched]})()
         rows = self._apply_filters(self._store.rows.get(self._table, []))
         if getattr(self, "_single", False):
             return type("Resp", (), {"data": rows[0] if rows else None})()

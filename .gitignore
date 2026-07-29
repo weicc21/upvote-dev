@@ -150,3 +150,8 @@ litellm_cache.sqlite/
 appendonlydir/
 __pycache__/
 *.py[cod]
+
+# Local demo/test state — machine-specific, never shared
+.demo_baseline.json
+.pdd/core_dumps/
+dump.rdb

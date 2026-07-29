@@ -1,0 +1,119 @@
+<pdd-reason>The step that makes the whole product true. Everything before it is opinion; this is where a community vote becomes source code in a real repository, with no human reading the diff.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"CompileOutcome","signature":"@dataclass(frozen=True) class CompileOutcome","returns":"feature_id: str; ok: bool; version_hash: str | None; summary: str; log_tail: str; duration_s: float"},
+  {"name":"Runner","signature":"Runner = Callable[[str, Path, Mapping[str, str]], Awaitable[tuple[int, str, str]]]","returns":"injected seam: (command, cwd, env) -> (returncode, stdout, stderr)"},
+  {"name":"build_feature_block","signature":"def build_feature_block(feature: Mapping[str, Any]) -> str","returns":"the text appended to the target prompt for one feature"},
+  {"name":"compile_feature","signature":"async def compile_feature(feature: Mapping[str, Any], supabase: AsyncClient, redis: Redis, *, runner: Runner | None = None) -> CompileOutcome","returns":"append, compile, and resolve one feature"},
+  {"name":"compile_next","signature":"async def compile_next(supabase: AsyncClient, redis: Redis, *, runner: Runner | None = None) -> CompileOutcome | None","returns":"compile the oldest IN_SPRINT feature, or None when there is none"},
+  {"name":"main","signature":"def main() -> None","returns":"entry point — compile whatever is waiting, then exit"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+
+Implement `orchestrator/compiler.py`. It edits the target app's prompt file under
+`settings.TARGET_PROMPT_DIR` and shells out to `settings.COMPILE_COMMAND`.
+
+<responsibility>
+Write the winning feature into the target app's prompt, regenerate the app from it, and leave the feature in an honest state either way.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT call an LLM. `COMPILE_COMMAND` runs pdd, which owns the model, the prompt, and the cost.
+This module DOES NOT select what to build — the sprint already did that, and anything `IN_SPRINT` has been judged buildable.
+This module DOES NOT commit, push, tag, or deploy. Local testing runs with `SKIP_PUSH=1`; publishing is US-10's concern.
+This module DOES NOT edit the target app's generated source directly. Prompts are source; the compiler edits the prompt and lets pdd produce the code.
+This module DOES NOT screen, dedup, or reshape a feature.
+</non_responsibilities>
+
+<vocabulary>
+Duplicate: a second Feature Block for a feature whose id already appears in the target prompt. It would state the same behaviour twice, and the second copy is invisible to anyone reading the built app.
+Safe: of running the command through a shell, that the string came from operator configuration and never from anything a community member typed.
+Successful: of a compile, that the runner exited zero within the timeout. Nothing else is inspected — pdd owns whether the generated source is any good.
+Feature Block: the text this module appends to the target prompt for one shipped feature — its title, the behaviour the community asked for, and a comment carrying its id. The target prompt's own header calls these "validated community Feature Blocks".
+Anchor: the line `# [COMMUNITY FEATURES INSERTION ZONE]` in the target prompt. Everything above it is the baseline blueprint and is never touched; blocks go below it, oldest first.
+Runner: the injected seam that actually spawns the compile. Replacing it is what lets the whole path be tested without spending a token or writing to a real repository.
+</vocabulary>
+
+<capabilities>
+- MAY read and write the target prompt file, and read the generated source to hash it.
+- MAY spawn `settings.COMPILE_COMMAND` through the runner.
+- MAY read and write `feature_requests`, `build_logs`, and `decision_log`.
+- MUST NOT call an LLM, run `git`, or make a network request of its own.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Append the Feature Block **below** the anchor line `# [COMMUNITY FEATURES INSERTION ZONE]`, preserving every byte above it. The target prompt states that headers above the anchor are never altered — the architecture constraint, the blueprint, and the anchor comment itself are what every later judgement is made against, and rewriting them silently changes the rules the community has been voting under.
+R2 (MUST): Fail loudly when the anchor is absent rather than appending to the end of the file. A missing anchor means the target prompt is not the file this module thinks it is, and appending anyway corrupts it.
+R2a (MUST): Resolve the blueprint by its **exact filename** under `TARGET_PROMPT_DIR`, and fail when it is absent. MUST NOT discover it by globbing `*.prompt` and taking the first match — that directory is a whole repository, and appending community features into whatever file happens to sort first is unrecoverable.
+R3 (MUST): Write the whole prompt file **atomically** — render the new contents in memory, write a temporary file in the same directory, then replace. A crash midway through a direct write leaves the target app with a truncated prompt and no way to tell what it used to be.
+R4 (MUST): Carry the feature's id in the block as a comment, and MUST NOT append a block for a feature whose id already appears in the file. A compile that runs twice for one feature would duplicate the behaviour in the prompt, and the second copy is invisible to everyone reading the app.
+R5 (MUST): Snapshot the prompt file's contents before editing, and restore that exact text when the compile fails. A failed feature's block left behind poisons every subsequent compile — the next feature would be built against a blueprint containing work that does not exist and was never shipped.
+R6 (MUST): Run `settings.COMPILE_COMMAND` through a shell, with `cwd` set to `settings.TARGET_PROMPT_DIR`, and inject `PDD_COMMAND_MAX_OUTPUT_TOKENS` into the child environment. Unset, pdd sends no `max_tokens` and the provider ceiling truncates the generated source mid-file — a failure that reads as a broken compile rather than a missing variable. A shell is what lets an operator write prefixes and `&&` chains.
+R6a (MUST): Inject the pdd credential (`TOKENROUTER_API_KEY`) into the child environment alongside the token ceiling. pdd resolves its `.env` relative to its own working directory — the target repo, which has no `.env` — and pydantic-settings loads this project's `.env` into `Settings` without exporting to `os.environ`. Relying on inheritance works only when a developer happens to launch from this repo and fails in every daemon, with the misleading message "All candidate models failed".
+R7 (MUST NOT): Build any part of the command string from pitch content, a feature title, or anything else a community member typed. Running the command through a shell is safe only while the string is operator-supplied configuration.
+R8 (MUST): Bound the compile with a timeout and treat expiry as a failure. pdd occasionally blocks on an interactive prompt — `Overwrite existing files? [Y/n]` with no TTY hangs forever — and a compiler that waits indefinitely stalls the pipeline with no signal.
+R9 (MUST): Capture stdout and stderr, and keep only a bounded tail of each for the record. Whole compiler logs are megabytes, and the last lines are where the error is.
+R10 (MUST): On success move the feature to `COMPILED`; on failure return it to `VOTING`. A feature the compiler could not build has not lost its votes and has not been rejected — it goes back to the board so a later sprint can try it again against a changed app.
+R11 (MUST NOT): Leave a feature `IN_SPRINT` under any exit path, including a timeout, a raised exception, or a failed database write. `IN_SPRINT` means "being built right now"; a feature stuck there is invisible to the next sprint's selection and looks to the community like work that never finishes.
+R12 (MUST): Guard each transition on the row still being `IN_SPRINT`, so a feature changed by another process between selection and write is left alone rather than overwritten.
+R13 (MUST): Record one `build_logs` row per attempt using **only** that table's columns — `version_hash`, `synthesis_summary`, `status`. It does not have a `feature_id` or a `log_tail`, and inserting either raises `PGRST204`. The feature link belongs in `decision_log`, which has the column; `synthesis_summary` is the only free-text field and is bounded. The pipeline has no human reviewer, so this table is the only account of what was attempted and what happened.
+R14 (MUST): Derive `version_hash` by hashing the **single generated source file** (`streaks_demo.tsx`) after a successful compile — not the prompt, not the clock, and never by walking `TARGET_PROMPT_DIR`. That directory is a git working tree containing `node_modules/`, `dist/` and `.git/`, so a recursive hash is both slow and different on every machine. It answers "which build is this?", and two compiles producing identical code should produce identical hashes.
+R15 (MUST): Record a `decision_log` row with phase `compile`, agent `compiler`, and `model_version` `programmatic` — this module makes no model call, and claiming a model version it did not use corrupts the governance dataset.
+R16 (MUST): Publish `agent_events` for compile started, succeeded, and failed, carrying phase and micro-copy only. Pitch content and compiler output MUST NOT reach the public ticker: one is unscreened text and the other can echo it back.
+R17 (MUST): Take the Supabase and Redis clients as arguments and accept an injected `runner`, so the whole path is testable without a subprocess, a token, or a real repository. Only `main()` constructs real clients and the real runner.
+R18 (MUST): Have `compile_next` take the **oldest** `IN_SPRINT` feature and return `None` when there is none, without raising. An empty queue is the normal state between sprints.
+R19 (MUST): Write a Feature Block a later reader can act on — the title as a heading and the community's own description as the behaviour to implement. This text is read by the compiler model that writes the app and by the architect judging the next feature's buildability, so it must describe behaviour rather than reproduce the pitch verbatim as a quote.
+R20 (MUST NOT): Edit, patch, or write the target app's generated source directly. Prompts are source and code is output; a hand-edited artifact is overwritten by the next compile and its behaviour vanishes with no trace in the prompt.
+R21 (MUST): Log every attempt with the feature id, the outcome, and the duration, at info.
+</contract_rules>
+
+<pdd>
+**The compiler does not deploy.** `COMPILE_COMMAND` regenerates the source and stops; publishing is
+a separate step (US-10) run with `SKIP_PUSH=1` during testing, so a test compile never disturbs the
+hosted sandbox. That is why `deployments` is not written here — a build is not a deploy.
+
+**Failure returns the feature to `VOTING`, not to the Holding Pattern.** Holding means the architect
+judged the idea unbuildable against the blueprint; a failed compile is a mechanical outcome that
+says nothing about the idea's merit, and dressing it as an architectural verdict would put a
+misleading explanation in front of the community.
+
+**One feature per invocation.** The sprint selects one winner and the compiler builds it; batching
+would make a single failure ambiguous across several features and make the rollback in R5 unable to
+say which block to remove.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__compile_spec_into_source_code.md
+R2: docs/user_stories/story__compile_spec_into_source_code.md
+R2a: docs/user_stories/story__compile_spec_into_source_code.md
+R3: docs/user_stories/story__compile_spec_into_source_code.md
+R4: docs/user_stories/story__compile_spec_into_source_code.md
+R5: docs/user_stories/story__compile_spec_into_source_code.md
+R6: docs/user_stories/story__compile_spec_into_source_code.md
+R6a: docs/user_stories/story__compile_spec_into_source_code.md
+R7: docs/user_stories/story__screen_incoming_pitches.md
+R8: docs/user_stories/story__compile_spec_into_source_code.md
+R9: docs/user_stories/story__compile_spec_into_source_code.md
+R10: docs/user_stories/story__compile_spec_into_source_code.md
+R11: docs/user_stories/story__compile_spec_into_source_code.md
+R12: docs/user_stories/story__threshold_triggers_a_sprint.md
+R13: docs/user_stories/story__decision_log.md
+R14: docs/user_stories/story__preview_the_shipped_feature.md
+R15: docs/user_stories/story__decision_log.md
+R16: docs/user_stories/story__watch_the_agents_work.md
+R17: orchestrator/tests/test_compiler.py
+R18: orchestrator/tests/test_compiler.py
+R19: docs/user_stories/story__compile_spec_into_source_code.md
+R20: docs/user_stories/story__compile_spec_into_source_code.md
+R21: docs/user_stories/story__decision_log.md
+</coverage>

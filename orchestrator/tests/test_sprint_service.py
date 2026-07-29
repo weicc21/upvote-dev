@@ -549,10 +549,40 @@ async def test_r15_never_leaks_pitch_content_to_the_public_ticker(
 
 
 def test_module_never_calls_an_llm_directly() -> None:
-    """Every judgement goes through the architect, which owns the model pin."""
-    src = MODULE_SRC.read_text()
-    for forbidden in ("openai", "AsyncOpenAI", "LLM_MODEL", "chat.completions", "httpx.post"):
-        assert forbidden not in src, f"sprint_service reached for {forbidden}"
+    """Every judgement goes through the architect, which owns the model pin.
+
+    Checks imports and calls rather than substrings: the sprint legitimately
+    *names* `settings.LLM_MODEL_ARCHITECT` when recording which model decided
+    (R21), and a substring ban made that a false positive — the same
+    substring-vs-AST trap this project has hit repeatedly.
+    """
+    tree = ast.parse(MODULE_SRC.read_text())
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not (imported & {"openai", "anthropic", "litellm", "httpx", "requests"}), (
+        f"sprint_service imported an LLM/HTTP client: {imported}"
+    )
+
+    # No completion-style call anywhere.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in {"create", "acreate", "completion", "chat"}, (
+                f"sprint_service called {ast.unparse(node.func)}"
+            )
+
+
+def test_the_model_id_is_only_ever_recorded_never_called() -> None:
+    """Naming the model in a governance record is not the same as using it."""
+    tree = ast.parse(MODULE_SRC.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            rendered = ast.unparse(node.func)
+            assert "LLM_MODEL" not in rendered, f"the model id was called: {rendered}"
 
 
 def test_module_does_not_compile_or_write_the_target_prompt() -> None:
@@ -656,3 +686,86 @@ def test_r3b_no_deferral_memory_is_written_anywhere() -> None:
     src = MODULE_SRC.read_text()
     for marker in ("deferred_set", "sprint:deferred", "owed", "sadd", "smembers"):
         assert marker not in src, f"sprint_service kept deferral state via {marker}"
+
+
+# ===========================================================================
+# R21 / R22 / R23 — the sprint's decisions are on the record (US-12)
+# ===========================================================================
+
+
+def _decisions(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture what the sprint files, without a database."""
+    filed: list[dict[str, Any]] = []
+
+    async def _fake(_sb: Any, **kw: Any) -> bool:
+        filed.append(kw)
+        return True
+
+    monkeypatch.setattr(S, "record_decision", _fake)
+    return filed
+
+
+@pytest.mark.asyncio
+async def test_r21_a_selection_is_recorded_with_the_deciding_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filed = _decisions(monkeypatch)
+    stub_verdict(monkeypatch, **{"f-1": BuildVerdict("f-1", True, Friction.green, "fits cleanly")})
+    await run_sprint(FakeSupabase([feature()]), FakeRedis())
+
+    friction = [d for d in filed if str(d.get("phase")) .endswith("friction")]
+    assert friction, "selecting a feature left no record"
+    assert friction[0]["feature_id"] == "f-1"
+    assert friction[0]["model_version"] != "programmatic", "a model made this call"
+
+
+@pytest.mark.asyncio
+async def test_r21_a_hold_is_recorded_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Holding a feature the community won is the most consequential call here."""
+    filed = _decisions(monkeypatch)
+    reason = "The blueprint forbids a server and this needs accounts."
+    stub_verdict(monkeypatch, **{"f-1": BuildVerdict("f-1", False, Friction.red, reason)})
+    await run_sprint(FakeSupabase([feature()]), FakeRedis())
+
+    held = [d for d in filed if d.get("feature_id") == "f-1"]
+    assert held, "a hold left no record"
+    import json as _json
+
+    assert reason in _json.dumps(held[0]["decision"], default=str)
+
+
+@pytest.mark.asyncio
+async def test_r22_a_failed_decision_write_does_not_change_the_sprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Governance is a record, not a control path."""
+
+    async def _fails(_sb: Any, **_kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(S, "record_decision", _fails)
+    stub_verdict(monkeypatch)
+    db = FakeSupabase([feature()])
+    outcome = await run_sprint(db, FakeRedis())
+    assert outcome.selected == ("f-1",)
+    assert db.rows[0]["status"] == FeatureStatus.IN_SPRINT
+
+
+@pytest.mark.asyncio
+async def test_r23_no_pitch_text_reaches_the_permanent_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """decision_log is never pruned; the board already carries public text."""
+    import json as _json
+
+    filed = _decisions(monkeypatch)
+    title = "Blockchain-verified check-ins"
+    desc = "Anchor a hash of every check-in on a public chain."
+    stub_verdict(monkeypatch)
+    await run_sprint(FakeSupabase([feature(title=title, description=desc)]), FakeRedis())
+
+    blob = _json.dumps([d["decision"] for d in filed], default=str)
+    assert title not in blob
+    assert desc not in blob

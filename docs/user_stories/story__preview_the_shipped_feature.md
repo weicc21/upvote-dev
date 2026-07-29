@@ -1,5 +1,5 @@
-<!-- pdd-story-prompts: config_python.prompt -->
-<!-- pdd-story-dev-units: config_python.prompt -->
+<!-- pdd-story-prompts: config_python.prompt, deploy_python.prompt, sandbox_panel_typescriptreact.prompt -->
+<!-- pdd-story-dev-units: config_python.prompt, deploy_python.prompt -->
 
 # User Story: preview_the_shipped_feature
 

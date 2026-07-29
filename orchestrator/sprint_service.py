@@ -27,8 +27,10 @@ from orchestrator.architect import (
     assess_buildability,
     load_blueprint,
 )
+from orchestrator.decisions import record_decision, PROGRAMMATIC
 from shared.config import settings
 from shared.constants import (
+    DecisionPhase,
     REDIS_AGENT_EVENTS,
     TABLE_FEATURE_REQUESTS,
     FeatureStatus,
@@ -138,7 +140,7 @@ async def _conditional_update(
 
 async def run_sprint(
     supabase: AsyncClient,
-    redis: aioredis.Redis,
+    redis: Redis,
     *,
     judge: Judge | None = None,
 ) -> SprintOutcome:
@@ -282,6 +284,20 @@ async def _run_sprint_inner(
                         f"Feature selected for sprint (friction: {verdict.friction})",
                         feature_id=fid,
                     )
+                    # R21: Record the selection decision (R22: ignore result, R23: no title/description)
+                    await record_decision(
+                        supabase,
+                        phase=DecisionPhase.FRICTION,
+                        agent="sprint_service",
+                        decision={
+                            "type": "selected",
+                            "friction": verdict.friction.value,
+                            "buildable": True,
+                            "explanation": verdict.explanation,
+                        },
+                        model_version=settings.LLM_MODEL_ARCHITECT,
+                        feature_id=fid,
+                    )
                 else:
                     # R12: Row changed between selection and write — skip
                     logger.info(
@@ -323,6 +339,22 @@ async def _run_sprint_inner(
                         redis,
                         "sprint",
                         f"Feature held — conflicts with current blueprint (friction: {verdict.friction})",
+                        feature_id=fid,
+                    )
+                    # R21: Record the hold decision (R22: ignore result, R23: no title/description)
+                    await record_decision(
+                        supabase,
+                        phase=DecisionPhase.FRICTION,
+                        agent="sprint_service",
+                        decision={
+                            "type": "postpone",
+                            "friction": verdict.friction.value,
+                            "buildable": False,
+                            # The reason, not just the outcome (R21). Architect
+                            # prose, never the author's text (R23).
+                            "explanation": verdict.explanation,
+                        },
+                        model_version=settings.LLM_MODEL_ARCHITECT,
                         feature_id=fid,
                     )
                 else:
@@ -428,6 +460,15 @@ async def _end_of_sprint_maintenance(
         if wrote:
             rolled_back.append(rid)
             logger.info("Feature %s rolled back IN_SPRINT → VOTING (stale)", rid)
+            # R21: Record the rollback decision (R22: ignore result, R23: no title/description)
+            await record_decision(
+                supabase,
+                phase=DecisionPhase.LIFECYCLE,
+                agent="sprint_service",
+                decision={"type": "rollback", "reason": "stale_in_sprint"},
+                model_version=PROGRAMMATIC,
+                feature_id=rid,
+            )
 
     # --- Decay: old VOTING rows below threshold → ARCHIVED ---
     decay_cutoff = (
@@ -457,6 +498,15 @@ async def _end_of_sprint_maintenance(
         if wrote:
             archived.append(aid)
             logger.info("Feature %s decayed VOTING → ARCHIVED (below threshold, old)", aid)
+            # R21: Record the archival decision (R22: ignore result, R23: no title/description)
+            await record_decision(
+                supabase,
+                phase=DecisionPhase.LIFECYCLE,
+                agent="sprint_service",
+                decision={"type": "archival", "reason": "below_threshold_decay"},
+                model_version=PROGRAMMATIC,
+                feature_id=aid,
+            )
 
     return rolled_back, archived
 

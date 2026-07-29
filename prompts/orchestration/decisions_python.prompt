@@ -1,0 +1,83 @@
+<pdd-reason>The accountability seam. An AI-governed roadmap that cannot say why it decided something is indistinguishable from an arbitrary one, and this is the only place those reasons are kept.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"record_decision","signature":"async def record_decision(supabase: AsyncClient, *, phase: DecisionPhase, agent: str, decision: Mapping[str, Any], model_version: str, feature_id: str | None = None, batch_id: str | None = None) -> bool","returns":"True when the row was written; False when it could not be, never raising"},
+  {"name":"PROGRAMMATIC","signature":"PROGRAMMATIC: Final[str]","returns":"the model_version recorded for deterministic decisions"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+
+Implement `orchestrator/decisions.py`. `DecisionPhase` and `TABLE_DECISION_LOG` come from
+`shared.constants`.
+
+<responsibility>
+Write one durable, queryable record of every automated decision, without ever becoming a reason the pipeline stops.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT make decisions, judge anything, or call a model. It records what a caller already decided.
+This module DOES NOT read the log back or aggregate it. Reporting is a later concern and a different shape.
+This module DOES NOT write to `build_logs`, which is keyed by build rather than by feature.
+This module DOES NOT own retention. `decision_log` is permanent and write-only by design.
+</non_responsibilities>
+
+<vocabulary>
+Phase: which stage of the pipeline produced the decision — `screening`, `dedup`, `friction`, `compile`, `deploy`, `lifecycle`. It is the `decision_phase` enum, and inventing a value outside it is a hard database error.
+Agent: the component that decided, named as the community would refer to it (`screener`, `pm_agent`, `architect`, `sprint_service`, `compiler`, `janitor`), not a class path.
+Programmatic: the literal string `programmatic`, lowercase — matching `schema.sql` and the row `compiler.py` already writes. It is the `model_version` recorded when a decision involved no model at all — a threshold comparison, a deterministic filter, a timeout.
+Verdict payload: the `decision` JSON. It holds what was decided and why, in the decider's own terms.
+</vocabulary>
+
+<capabilities>
+- MAY insert into `decision_log` through the injected Supabase client.
+- MUST NOT call a model, read Redis, or touch any other table.
+- MUST NOT raise into the caller.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Insert exactly one `decision_log` row per call, using only that table's columns — `feature_id`, `batch_id`, `phase`, `agent`, `decision`, `model_version`. Inventing a column raises `PGRST204` and loses the record.
+R2 (MUST NOT): Raise, ever. Return `False` and log a warning when the insert fails. This table is a governance record, not a control path: a screening verdict that cannot be filed must not stop the pitch being screened, and an outage in logging must never become an outage in the product.
+R3 (MUST): Accept a `phase` from the `DecisionPhase` enum and reject anything else before touching the database, so a typo fails in the caller's test rather than as a Postgres enum error in production.
+R4 (MUST): Record `model_version` as the actual model identifier when a model decided, and `PROGRAMMATIC` when none did. A deterministic threshold comparison labelled with a model id corrupts the dataset this table exists to build — you can no longer ask which verdicts a model is accountable for.
+R5 (MUST NOT): Write pitch content — a title, a description, or any author-supplied text — into the `decision` payload for a pitch that has not been screened, or one that was rejected. Unscreened and rejected content never reaches Postgres; it lives in Redis under a TTL. This table is permanent and never pruned, so a rejected injection attempt stored here would outlive every other trace of it.
+R6 (MUST): Record the decision's *reason* rather than only its outcome — the verdict, the category, the scores or the explanation the decider produced. "Rejected" alone is not accountability, and the story's whole point is that a decision be arguable.
+R7 (MUST): Accept a null `feature_id` for a decision that is not about one feature, such as a sprint-level or batch-level judgement. The column is nullable precisely for this.
+R8 (MUST): Serialise the payload as JSON the database will accept — enums to their value, **dataclasses to their fields** (the architect returns `Shape` and `BuildVerdict`, and those are exactly what a caller wants to file), sets and tuples to lists, and anything still unrecognised to its string form rather than letting the driver raise. A stringified value in the record is worth more than a lost record, which is R2 restated for the payload.
+R9 (MUST): Take the Supabase client as an argument. Nothing here constructs a client, so every caller's test drives it against a fake.
+</contract_rules>
+
+<pdd>
+**Fail-soft is the single most important property here**, and it is why `record_decision` returns a
+bool rather than raising. Every caller sits on the pipeline's critical path: the screener deciding a
+pitch, the sprint gating a feature, the compiler resolving a build. If filing the record could throw,
+the accountability feature would become the pipeline's most fragile dependency, and the first
+Postgres hiccup would stop pitches being screened.
+
+**Why the callers log rather than the agents.** `screener`, `pm_agent` and `architect` are pure —
+they take a judge and return a verdict, and perform no database I/O, which is what lets them be
+tested against a stubbed model with no network. Handing them a Supabase client to file their own
+decisions would undo that. The orchestrator that called the agent already holds both the verdict and
+the client, so it is the natural place.
+
+**The compiler already writes its own row inline** and is left alone for now. It is the one caller
+whose record predates this module; folding it in is a small cleanup, not a fix.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__decision_log.md
+R2: docs/user_stories/story__decision_log.md
+R3: docs/user_stories/story__decision_log.md
+R4: docs/user_stories/story__decision_log.md
+R5: docs/user_stories/story__screen_incoming_pitches.md
+R6: docs/user_stories/story__decision_log.md
+R7: docs/user_stories/story__threshold_triggers_a_sprint.md
+R8: orchestrator/tests/test_decisions.py
+R9: orchestrator/tests/test_decisions.py
+</coverage>

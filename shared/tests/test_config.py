@@ -25,6 +25,9 @@ REQUIRED = {
     "REDIS_URL": "redis://localhost:6379/0",
     "LLM_BASE_URL": "https://llm",
     "LLM_API_KEY": "k",
+    # Required since US-09: the compiler passes it to the compile subprocess,
+    # which runs in the target repo where no .env exists.
+    "TOKENROUTER_API_KEY": "tr",
     "TARGET_PROMPT_DIR": "/tmp/t",
     "COMPILE_COMMAND": "echo",
     "RENDER_WEBHOOK_SECRET": "s",

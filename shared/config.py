@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     REDIS_URL: str
     LLM_BASE_URL: str
     LLM_API_KEY: SecretStr
+    # Named by every row of ~/.pdd/llm_model.csv. The compiler injects it into
+    # the compile subprocess: pdd resolves .env from its own cwd, which is the
+    # target repo, and that repo has no .env.
+    TOKENROUTER_API_KEY: SecretStr
     TARGET_PROMPT_DIR: Path
     COMPILE_COMMAND: str
     RENDER_WEBHOOK_SECRET: SecretStr
@@ -64,6 +68,10 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: SecretStr | None = None
     RENDER_API_KEY: SecretStr | None = None
     RENDER_SERVICE_ID: str | None = None
+    # Bootstrap embed target, used by GET /api/sandbox before this system
+    # has ever deployed anything. Optional: without it a fresh install
+    # simply reports status=none.
+    SANDBOX_URL: str | None = None
     DEV_MODE: bool = False
 
     # Tunables — fallbacks imported from shared/constants.py (R2)

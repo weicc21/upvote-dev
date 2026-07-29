@@ -13,6 +13,7 @@
 <pdd-dependency>prompts/orchestration/screener_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/pm_agent_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/architect_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/decisions_python.prompt</pdd-dependency>
 
 Implement `orchestrator/ingestion_service.py` — a long-running process, not an ASGI app.
 
@@ -43,6 +44,7 @@ This module DOES NOT write a feature block or acceptance criteria; that is sprin
 </non_responsibilities>
 
 <vocabulary>
+Duplicate: a pitch the PM agent judged to be the same idea as an existing feature. Its vote is folded into that feature and no new row is created.
 **Intake item** — one JSON string on the `feature_intake` list, written by `POST /api/features`. Its keys are exactly `feature_id`, `author_id`, `title`, `description`, `submitted_at`.
 **Survivor** — a pitch whose verdict is `passed=True`. Only survivors reach Postgres.
 **Board row** — a `feature_requests` row. A pitch becomes public the moment one is inserted, so the insert is the last step of handling an item, never the first.
@@ -92,6 +94,10 @@ R32 (MUST): On `SPLIT`, insert the parent with status `SPLIT` and then one `VOTI
 R33 (MUST): Give split children `upvotes` 0 and no vote row, and keep the author's single vote on the parent. The author pitched one idea, so they get one vote — seeding each of three children with a vote would turn one person into three votes and break the invariant that every upvote is backed by a vote row.
 R34 (MUST): Treat a `decide_shape` failure as `VOTING` and continue. The contract already falls back that way; if it raises anyway, a screened and deduped pitch must still reach the board rather than be lost to an architect outage.
 R35 (MUST): Report `postponed` and `split` as their own outcome tags. A postponed feature and a votable one are different results for the author, and collapsing them into `inserted` hides how much of the board the gate is holding back.
+R36 (MUST): File every agent verdict through `decisions.record_decision` as it happens — the screening verdict at phase `screening` with `LLM_MODEL_SCREENING`, the dedup classification at phase `dedup` with `LLM_MODEL_PM`, and the shape decision at phase `friction` with `LLM_MODEL_ARCHITECT`. These are the three judgements that decide whether a pitch is ever seen, whether it keeps its own identity, and what shape it takes; until now none of them left a trace.
+R37 (MUST): Record the verdict's **reason** alongside its outcome — the screener's category and detail, the classifier's outcome and the target it matched, the architect's friction and explanation. An outcome with no reason cannot be argued with, which is the whole point of the log.
+R38 (MUST NOT): Put the pitch's title or description into any decision payload, and most emphatically not on the rejection path. `decision_log` is permanent and never pruned, while a rejected pitch's text lives in Redis under a TTL precisely so it expires — filing it here would make a rejected prompt-injection attempt the most durable copy of itself in the system.
+R39 (MUST NOT): Let a failed decision write change what the daemon does. `record_decision` returns a bool and never raises; the pitch is screened, deduped and shaped regardless of whether the record could be filed.
 </contract_rules>
 
 <pdd>
@@ -122,6 +128,7 @@ the cheap half of the guarantee.
 <include optional>orchestrator/screener.py</include>
 <include optional>orchestrator/pm_agent.py</include>
 <include optional>orchestrator/architect.py</include>
+<include optional>orchestrator/decisions.py</include>
 <include select="lines:56-84">schema.sql</include>
 </dependencies>
 
@@ -160,5 +167,9 @@ R31: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R32: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R33: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R34: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R36: docs/user_stories/story__decision_log.md
+R37: docs/user_stories/story__decision_log.md
+R38: docs/user_stories/story__screen_incoming_pitches.md
+R39: docs/user_stories/story__decision_log.md
 R35: docs/user_stories/story__architect_writes_acceptance_criteria.md
 </coverage>

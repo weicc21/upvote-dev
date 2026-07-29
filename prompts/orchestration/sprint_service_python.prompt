@@ -12,6 +12,7 @@
 <pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/orchestration/architect_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/decisions_python.prompt</pdd-dependency>
 
 Implement `orchestrator/sprint_service.py`. It is a scheduled worker, not an ASGI app: it reads and
 writes Postgres through `supabase-py`, takes a lock in Redis, and calls the architect. It is invoked
@@ -66,6 +67,9 @@ R16 (MUST): Take the Supabase and Redis clients as arguments rather than constru
 R17 (MUST): Accept an injected `judge` and pass it through to the architect, so a test can gate features without an LLM.
 R18 (MUST): Have `main()` run one sprint per `settings.SPRINT_CADENCE_SECONDS`, handle `SIGINT`/`SIGTERM` for a clean shutdown, close the Redis client with `aclose()`, and MUST NOT call `supabase.auth.sign_out()`.
 R19 (MUST): Log every transition with the feature id and the reason, at info. A sprint that moves seven features and says nothing is unauditable, and this is the step with no human in the loop.
+R21 (MUST): File every decision this sprint makes through `decisions.record_decision`, so the community can ask why later: each selection and each hold at phase `friction` carrying the architect's friction level **and its explanation in full**, plus the `LLM_MODEL_ARCHITECT` model id. The explanation is the reason, and a record holding only `buildable: false` is an outcome without one — `ai_explanation` on the row is overwritten by the next hold, so this log is the only permanent history of *why*, and each rollback and archival at phase `lifecycle` with `PROGRAMMATIC` as the model version. Selecting a feature and holding one are the two most consequential automated judgements in the product, and until now neither left a record.
+R22 (MUST NOT): Let a failed decision write change the sprint's behaviour. `record_decision` returns a bool and never raises; a sprint MUST NOT abort, retry, or alter a transition because the governance record could not be filed.
+R23 (MUST NOT): Put a feature's title or description into a decision payload. The row is permanent and never pruned, and the board already carries the text for anything public.
 R20 (MUST NOT): Delete a row, ever. Every terminal state in this system is a status, so that the Vault can hold what the sprint passed over and a reboot can bring it back (US-16).
 </contract_rules>
 
@@ -90,6 +94,7 @@ and only the second is worth retrying unchanged next cadence.
 <include optional>shared/constants.py</include>
 <include optional>shared/config.py</include>
 <include optional>orchestrator/architect.py</include>
+<include optional>orchestrator/decisions.py</include>
 </dependencies>
 
 <coverage>
@@ -115,4 +120,7 @@ R17: orchestrator/tests/test_sprint_service.py
 R18: docs/user_stories/story__threshold_triggers_a_sprint.md
 R19: docs/user_stories/story__decision_log.md
 R20: docs/user_stories/story__reboot_an_archived_request.md
+R21: docs/user_stories/story__decision_log.md
+R22: docs/user_stories/story__decision_log.md
+R23: docs/user_stories/story__screen_incoming_pitches.md
 </coverage>

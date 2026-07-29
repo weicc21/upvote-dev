@@ -1,0 +1,111 @@
+<pdd-reason>The last mile. A feature is not shipped because a compiler exited zero — it is shipped when the community can click it, and this is the only place that becomes true.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"router","signature":"router: APIRouter","returns":"GET /api/sandbox and POST /webhooks/render"},
+  {"name":"get_sandbox","signature":"GET /api/sandbox","returns":"200 {status: live, preview_url, version, deployed_at} | {status: none, preview_url}"},
+  {"name":"render_webhook","signature":"POST /webhooks/render","returns":"204 | 401 | 400"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/decisions_python.prompt</pdd-dependency>
+
+Implement `backend/routes/deploy.py`. Both paths are declared in the frozen `openapi.yaml`; this
+implements them exactly.
+
+<responsibility>
+Record that a build went live, move the features it carried to shipped, and tell the board where to point its iframe.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT trigger a deploy, call the Render API, or run git. It records what the platform reports.
+This module DOES NOT compile. US-09 produced the source; this is what happens after it is published.
+This module DOES NOT decide which features were in the build — the payload names them.
+This module DOES NOT serve the preview itself; the browser loads it directly from the deploy host.
+</non_responsibilities>
+
+<vocabulary>
+Successful: of a deploy, an event the platform reports as `deploy_live` with a preview URL inside the allowlist. Nothing else counts, however well the compile went.
+Recent: of a deployment, the one with the latest `created_at`. A feature can appear in several deploys and the board always means the newest.
+Live: a deploy the platform reports as serving traffic, with a preview URL inside the allowlist. Anything else is not live and never reaches the board.
+Bootstrap URL: `settings.SANDBOX_URL` — where the iframe points before this system has ever deployed anything, so a fresh install shows the target app rather than an empty box.
+Shipped feature: one named in a `deploy_live` payload's `feature_ids`. It is the only way a feature legitimately reaches `COMPILED`.
+Allowlist: `settings.SANDBOX_ALLOWED_HOSTS`. A preview URL outside it is refused, because this value ends up as an iframe `src` on the public board.
+</vocabulary>
+
+<capabilities>
+- MAY read and write `deployments` and `feature_requests`, and file decisions.
+- MAY read `settings` for the shared secret, the allowlist and the bootstrap URL.
+- MUST NOT call Render, run a subprocess, or make any outbound request.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Authenticate `POST /webhooks/render` with the shared secret from `settings.RENDER_WEBHOOK_SECRET`, comparing in constant time, and answer `401` when it is absent or wrong. This endpoint moves features to shipped; an unauthenticated caller could mark anything live.
+R2 (MUST): Exclude the webhook from CORS and from any browser-facing auth. It is a server-to-server call, and the frozen spec places it outside `/api` for exactly that reason.
+R3 (MUST): Validate `preview_url` against `settings.SANDBOX_ALLOWED_HOSTS`, whose entries are **wildcard patterns** such as `*.onrender.com`, and reject a `deploy_live` whose URL falls outside it. Exact string membership is wrong and refuses every real deploy: `streaks-demo.onrender.com` is not equal to `*.onrender.com`. Require `https` as well — the URL is loaded in an iframe on a page the community trusts. That value becomes an `iframe src` on the public board, so an unchecked host is a stored injection vector aimed at every visitor.
+R4 (MUST): Require `preview_url` on `deploy_live` and answer `400` without it. A live deploy nobody can open is not a deploy.
+R5 (MUST): Insert one `deployments` row per `deploy_live` — `version`, `render_deploy_id`, `preview_url`, and `shipped_feature_ids` as a JSON array. That row is what `feature_shipped_meta` resolves `Feature.shipped_version` and `shipped_at` through.
+R6 (MUST): Move every feature named in `feature_ids` from `IN_SPRINT` to `COMPILED`, guarded on the row still being `IN_SPRINT`. This is the transition the story means by "on successful deploy, the feature moves to COMPILED".
+R7 (MUST NOT): Move a feature that is not currently `IN_SPRINT`. A webhook replay, or an id the platform sent twice, must not resurrect an archived feature or re-ship one already live.
+R8 (MUST): Be idempotent on `render_deploy_id` — a redelivered webhook for a deploy already recorded answers `204` without inserting a second row. Platforms retry, and a duplicated deploy row would double-count the shipped set.
+R9 (MUST): On `deploy_failed`, return the named features to `VOTING` and insert no `deployments` row. The build did not reach anyone, so the feature has not shipped; it keeps its votes and can be built again.
+R10 (MUST): File a decision at phase `deploy` with agent `deploy_webhook` and `PROGRAMMATIC` as the model version, recording the event, the version, and how many features it carried. No model is involved and claiming one corrupts the dataset.
+R11 (MUST NOT): Let a failed decision write change the response. The deploy happened whether or not the record could be filed.
+R12 (MUST): Answer `GET /api/sandbox` with the most recent deployment as `{status: "live", preview_url, version, deployed_at}`.
+R13 (MUST): Answer `{status: "none", preview_url: <bootstrap>}` when no deployment exists, using `settings.SANDBOX_URL` when configured and `null` otherwise. A fresh install must still show the target app rather than an empty frame.
+R14 (MUST): Re-validate the stored `preview_url` against the allowlist on read, not only on write. The allowlist can be tightened after a row was stored, and the board must honour the current policy rather than a historical one.
+R15 (MUST NOT): Return a `preview_url` that fails validation. Answer as though there were no deployment, so the frontend's existing "unavailable" panel handles it.
+R16 (MUST): Make `GET /api/sandbox` anonymous and cacheable for about 30 seconds. Every visitor loads it and it changes only when a deploy lands.
+R17 (MUST NOT): Return `author_id`, pitch text, or any feature detail from either endpoint. The sandbox response is about a build, not about features.
+R18 (MUST): Take the Supabase client through the existing dependency, never constructing one, so both paths are testable against the fake the other routes already use.
+</contract_rules>
+
+<pdd>
+**This endpoint owns the `COMPILED` transition**, and that is a deliberate correction. `compiler.py`
+currently marks a feature `COMPILED` when the compile exits zero, but US-10's acceptance criterion
+is "on successful deploy, the feature moves to `COMPILED`", and `schema.sql` says the same: an
+INSERT into `deployments` "drives the IN_SPRINT->COMPILED transition". A feature whose source exists
+only on a laptop has not shipped. Compiling should leave it `IN_SPRINT` — still being built — until a
+deploy says otherwise. Until `compiler.py` is regenerated to match, both paths can set `COMPILED`
+and the guard in R7 keeps that harmless.
+
+**Local testing never calls this.** The demo compiles with `SKIP_PUSH=1`, so nothing is published
+and no webhook fires; `scripts/` can POST a `deploy_live` by hand to exercise the path. That is why
+the bootstrap URL in R13 matters — without a deploy row the board still needs somewhere to point.
+
+**`deploy_failed` is not a compile failure.** The compiler already returns a feature to `VOTING` when
+the build breaks. This is the narrower case where the build succeeded and the platform could not
+serve it.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include select="lines:140:181">prompts/shared/openapi.yaml</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+<include optional>orchestrator/decisions.py</include>
+<include optional>backend/deps.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__preview_the_shipped_feature.md
+R2: docs/user_stories/story__preview_the_shipped_feature.md
+R3: docs/user_stories/story__preview_the_shipped_feature.md
+R4: docs/user_stories/story__preview_the_shipped_feature.md
+R5: docs/user_stories/story__preview_the_shipped_feature.md
+R6: docs/user_stories/story__preview_the_shipped_feature.md
+R7: docs/user_stories/story__threshold_triggers_a_sprint.md
+R8: backend/tests/test_deploy.py
+R9: docs/user_stories/story__compile_spec_into_source_code.md
+R10: docs/user_stories/story__decision_log.md
+R11: docs/user_stories/story__decision_log.md
+R12: docs/user_stories/story__preview_the_shipped_feature.md
+R13: docs/user_stories/story__preview_the_shipped_feature.md
+R14: docs/user_stories/story__preview_the_shipped_feature.md
+R15: docs/user_stories/story__preview_the_shipped_feature.md
+R16: backend/tests/test_deploy.py
+R17: docs/user_stories/story__browse_the_pipeline_board.md
+R18: backend/tests/test_deploy.py
+</coverage>

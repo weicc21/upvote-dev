@@ -23,7 +23,9 @@ This module DOES NOT construct Supabase, Redis, or LLM clients; `backend/deps.py
 </non_responsibilities>
 
 <vocabulary>
-**Secret** — `SUPABASE_SERVICE_KEY`, `LLM_API_KEY`, `RENDER_WEBHOOK_SECRET`, `RENDER_API_KEY`.
+**Secret** — `SUPABASE_SERVICE_KEY`, `LLM_API_KEY`, `TOKENROUTER_API_KEY`, `RENDER_WEBHOOK_SECRET`, `RENDER_API_KEY`.
+`TOKENROUTER_API_KEY` is the credential every row in `~/.pdd/llm_model.csv` names; the compiler passes
+it to the compile subprocess, which runs in the target repo where no `.env` exists.
 **Required** — absence is a startup failure, not a fallback.
 </vocabulary>
 
@@ -42,6 +44,7 @@ Settings, by group. Required keys have no default and MUST NOT be given one:
 | `REDIS_URL` | `str` | yes | — |
 | `LLM_BASE_URL` | `str` | yes | — |
 | `LLM_API_KEY` | `SecretStr` | yes | — |
+| `TOKENROUTER_API_KEY` | `SecretStr` | yes | — |
 | `TARGET_PROMPT_DIR` | `Path` | yes | — |
 | `COMPILE_COMMAND` | `str` | yes | — |
 | `RENDER_WEBHOOK_SECRET` | `SecretStr` | yes | — |
@@ -49,6 +52,7 @@ Settings, by group. Required keys have no default and MUST NOT be given one:
 | `FORUM_ORIGIN` | `str` | yes | — |
 | `SUPABASE_JWT_SECRET` | `SecretStr \| None` | no | `None` |
 | `RENDER_API_KEY` | `SecretStr \| None` | no | `None` |
+| `SANDBOX_URL` | `str \| None` | no | `None` |
 | `RENDER_SERVICE_ID` | `str \| None` | no | `None` |
 | `DEV_MODE` | `bool` | no | `False` |
 | `PITCH_COIN_LIMIT` | `int` | no | `DEFAULT_PITCH_COIN_LIMIT` |

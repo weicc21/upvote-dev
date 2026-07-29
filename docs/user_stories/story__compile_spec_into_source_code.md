@@ -1,3 +1,6 @@
+<!-- pdd-story-prompts: compiler_python.prompt, config_python.prompt -->
+<!-- pdd-story-dev-units: compiler_python.prompt, config_python.prompt -->
+
 # User Story: compile_spec_into_source_code
 
 **ID:** US-09

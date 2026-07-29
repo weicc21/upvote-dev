@@ -1,5 +1,5 @@
-<!-- pdd-story-prompts: constants_python.prompt -->
-<!-- pdd-story-dev-units: constants_python.prompt -->
+<!-- pdd-story-prompts: constants_python.prompt, decisions_python.prompt, ingestion_service_python.prompt, sprint_service_python.prompt, compiler_python.prompt -->
+<!-- pdd-story-dev-units: constants_python.prompt, decisions_python.prompt -->
 
 # User Story: decision_log
 

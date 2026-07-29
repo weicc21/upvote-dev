@@ -21,6 +21,7 @@ from postgrest.exceptions import APIError
 from supabase._async.client import AsyncClient, create_client
 
 from orchestrator.architect import Shape, decide_shape, load_blueprint
+from orchestrator.decisions import record_decision
 from orchestrator.pm_agent import Classification, FeatureRef, Outcome, classify
 from orchestrator.screener import ScreeningUnavailable, screen_pitch
 from shared.config import settings
@@ -28,6 +29,7 @@ from shared.constants import (
     REDIS_FEATURE_INTAKE,
     TABLE_FEATURE_REQUESTS,
     TABLE_FEATURE_VOTES,
+    DecisionPhase,
     FeatureStatus,
 )
 
@@ -170,12 +172,44 @@ async def process_one(raw: str, supabase: AsyncClient, *, blueprint: str) -> str
     except ScreeningUnavailable:
         # R16: infrastructure failure — own outcome, not a rejection
         logger.error("screening unavailable feature_id=%s", feature_id)
+        # R36/R37: record the unavailable screening decision
+        await record_decision(
+            supabase,
+            phase=DecisionPhase.SCREENING,
+            agent="screener",
+            decision={"outcome": "unavailable"},
+            model_version=settings.LLM_MODEL_SCREENING,
+            feature_id=feature_id,
+        )
         return "unavailable"
 
     if not verdict.passed:
         # R5: never persist rejected title/description anywhere
+        # R36/R37/R38: record rejection — reason and detail only, no title/description
+        await record_decision(
+            supabase,
+            phase=DecisionPhase.SCREENING,
+            agent="screener",
+            decision={
+                "outcome": "rejected",
+                "reason": verdict.reason.value if verdict.reason else None,
+                "detail": verdict.detail,
+            },
+            model_version=settings.LLM_MODEL_SCREENING,
+            feature_id=feature_id,
+        )
         logger.info("item feature_id=%s outcome=rejected", feature_id)
         return "rejected"
+
+    # R36/R37: record passing screening verdict
+    await record_decision(
+        supabase,
+        phase=DecisionPhase.SCREENING,
+        agent="screener",
+        decision={"outcome": "passed", "detail": verdict.detail},
+        model_version=settings.LLM_MODEL_SCREENING,
+        feature_id=feature_id,
+    )
 
     # -- Dedup / classify (R17, R24) ----------------------------------------
     try:
@@ -200,6 +234,20 @@ async def process_one(raw: str, supabase: AsyncClient, *, blueprint: str) -> str
         )
 
     outcome = classification.outcome
+
+    # R36/R37/R38: record the dedup classification
+    await record_decision(
+        supabase,
+        phase=DecisionPhase.DEDUP,
+        agent="pm_agent",
+        decision={
+            "outcome": classification.outcome.value,
+            "target_id": classification.target_id,
+            "detail": classification.detail,
+        },
+        model_version=settings.LLM_MODEL_PM,
+        feature_id=feature_id,
+    )
 
     # -- R23: already_shipped — insert nothing ------------------------------
     if outcome == Outcome.already_shipped:
@@ -260,6 +308,20 @@ async def process_one(raw: str, supabase: AsyncClient, *, blueprint: str) -> str
             children=(),
             explanation="",
         )
+
+    # R36/R37/R38: record the shape / friction decision
+    await record_decision(
+        supabase,
+        phase=DecisionPhase.FRICTION,
+        agent="architect",
+        decision={
+            "status": shape.status.value,
+            "friction": shape.friction.value,
+            "explanation": shape.explanation,
+        },
+        model_version=settings.LLM_MODEL_ARCHITECT,
+        feature_id=feature_id,
+    )
 
     # R30: use the status the shape returns
     status = shape.status
