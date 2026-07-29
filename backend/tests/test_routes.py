@@ -8,6 +8,9 @@ import uuid
 import pytest
 
 from shared.constants import (
+
+
+
     REDIS_FEATURE_INTAKE,
     TABLE_FEATURE_REQUESTS,
     TABLE_FEATURE_VOTES,
@@ -152,8 +155,7 @@ async def test_r12_unknown_status_is_rejected(make_client) -> None:
 
 async def test_r11_list_returns_features_key_and_no_total(make_client, fake_supabase) -> None:
     fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
-        {"id": FID, "title": "t", "description": "d", "status": "VOTING",
-         "upvotes": 3, "created_at": "2026-07-27T00:00:00Z", "parent_id": None},
+        full_row(id=FID, title="t", upvotes=3, created_at="2026-07-27T00:00:00Z"),
     ]
     r = make_client().get("/api/features?view=pipeline")
     assert r.status_code == 200
@@ -202,8 +204,7 @@ async def test_r17_promoted_pitch_is_not_listed_twice(make_client, fake_redis, f
                     "submitted_at": "2026-07-27T00:00:00Z"}),
     )
     fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
-        {"id": FID, "title": "t", "description": "d", "status": "VOTING",
-         "upvotes": 1, "created_at": "2026-07-27T00:00:00Z", "author_id": USER}
+        full_row(id=FID, title="t", upvotes=1, created_at="2026-07-27T00:00:00Z", author_id=USER)
     ]
     body = make_client().get("/api/features/mine").json()
     pending_ids = {p["feature_id"] for p in body["pending"]}
@@ -331,6 +332,40 @@ async def test_r14_both_routers_are_mounted(make_client) -> None:
     """Assert via the OpenAPI schema — app.routes exposes opaque wrappers."""
     from backend.main import app
 
+
+# --------------------------------------------------------------------------
+# Row fixtures
+# --------------------------------------------------------------------------
+# Postgres returns every column named in the route's projection, so a fake that
+# omits one is not a smaller truth — it is a different shape the real database
+# never produces. `full_row` fills the whole Feature projection so a widened
+# SELECT cannot break these tests without a real regression behind it.
+
+_FEATURE_DEFAULTS: dict = {
+    "id": "00000000-0000-4000-8000-000000000000",
+    "title": "A feature",
+    "description": "d",
+    "status": "VOTING",
+    "upvotes": 0,
+    "author_id": "11111111-1111-4111-8111-111111111111",
+    "author_handle": None,
+    "parent_id": None,
+    "split_depth": 0,
+    "unlock_threshold": None,
+    "extends_id": None,
+    "extends_title": None,
+    "postpone_count": 0,
+    "ai_explanation": None,
+    "merge_count": None,
+    "created_at": "2026-07-28T00:00:00Z",
+    "updated_at": None,
+}
+
+
+def full_row(**over) -> dict:
+    """A row shaped like Postgres returns it, with overrides applied."""
+    return {**_FEATURE_DEFAULTS, **over}
+
     paths = set(app.openapi()["paths"])
     assert "/api/features" in paths
     assert any("upvote" in p for p in paths), "votes router not mounted"
@@ -371,12 +406,13 @@ CHILD_B = "cccc3333-3333-4333-8333-333333333333"
 
 
 def _family() -> list[dict]:
-    base = {"description": "d", "created_at": "2026-07-28T00:00:00Z", "upvotes": 0}
     return [
-        {**base, "id": PARENT_ID, "title": "Habit customisation", "status": "SPLIT",
-         "parent_id": None, "upvotes": 1},
-        {**base, "id": CHILD_A, "title": "Per-habit colour", "status": "VOTING", "parent_id": PARENT_ID},
-        {**base, "id": CHILD_B, "title": "Drag to reorder", "status": "VOTING", "parent_id": PARENT_ID},
+        full_row(id=PARENT_ID, title="Habit customisation", status="SPLIT",
+                 parent_id=None, upvotes=1),
+        full_row(id=CHILD_A, title="Per-habit colour", status="VOTING",
+                 parent_id=PARENT_ID, unlock_threshold=50),
+        full_row(id=CHILD_B, title="Drag to reorder", status="VOTING",
+                 parent_id=PARENT_ID, unlock_threshold=50),
     ]
 
 
@@ -400,8 +436,7 @@ async def test_r30_parent_embeds_its_children(make_client, fake_supabase) -> Non
 async def test_r33_children_is_a_list_never_null(make_client, fake_supabase) -> None:
     """The frontend maps over it directly."""
     fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
-        {"id": FID, "title": "Solo feature", "description": "d", "status": "VOTING",
-         "upvotes": 3, "created_at": "2026-07-28T00:00:00Z", "parent_id": None},
+        full_row(id=FID, title="Solo feature", upvotes=3),
     ]
     body = make_client().get("/api/features?view=pipeline").json()
     assert body["features"][0].get("children") is not None
@@ -411,9 +446,70 @@ async def test_r33_children_is_a_list_never_null(make_client, fake_supabase) -> 
 async def test_r31_a_child_is_still_reachable_directly(make_client, fake_supabase) -> None:
     """Root-only is a rule about lists; an author must still find their children."""
     fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
-        {"id": CHILD_A, "title": "Per-habit colour", "description": "d", "status": "VOTING",
-         "upvotes": 0, "created_at": "2026-07-28T00:00:00Z", "parent_id": PARENT_ID},
+        full_row(id=CHILD_A, title="Per-habit colour", parent_id=PARENT_ID),
     ]
     r = make_client().get(f"/api/features/{CHILD_A}")
     assert r.status_code == 200
     assert r.json()["id"] == CHILD_A
+
+
+# ==========================================================================
+# R34 / R39 — the wire contract is the whole contract
+# ==========================================================================
+
+FEATURE_WIRE_FIELDS = {
+    "id", "title", "description", "status", "upvotes", "author_handle", "parent_id",
+    "split_depth", "unlock_threshold", "extends_id", "extends_title", "postpone_count",
+    "ai_explanation", "merge_count", "shipped_version", "shipped_at",
+    "viewer_has_voted", "children", "created_at", "updated_at",
+}
+
+
+async def test_r34_every_feature_field_is_returned(make_client, fake_supabase) -> None:
+    """A narrower projection silently disables features that are already built.
+
+    This shipped once: the endpoint returned ten of the twenty fields, so the
+    Holding tab's explanation, the dedup chips and every unlock bar were blank
+    in the browser while the component tests passed against fixtures.
+    """
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [
+        full_row(id=FID, ai_explanation="needs a server", postpone_count=2, merge_count=7)
+    ]
+    body = make_client().get("/api/features?view=pipeline").json()
+    feature = body["features"][0]
+    assert FEATURE_WIRE_FIELDS - set(feature) == set(), "fields missing from the response"
+    assert feature["ai_explanation"] == "needs a server"
+    assert feature["postpone_count"] == 2
+    assert feature["merge_count"] == 7
+
+
+async def test_r34_embedded_children_carry_the_full_shape_too(make_client, fake_supabase) -> None:
+    """One shape means one renderer, parents and children alike."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = _family()
+    body = make_client().get("/api/features?view=pipeline").json()
+    parent = next(f for f in body["features"] if f["id"] == PARENT_ID)
+    assert parent["children"], "the split parent lost its children"
+    for child in parent["children"]:
+        assert FEATURE_WIRE_FIELDS - set(child) == set(), "a child is a Feature too"
+    assert {c["unlock_threshold"] for c in parent["children"]} == {50}
+
+
+async def test_r35_author_id_is_still_never_returned(make_client, fake_supabase) -> None:
+    """R6 survives the widened projection."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = [full_row(id=FID, author_id="secret-uuid")]
+    body = make_client().get("/api/features?view=pipeline").json()
+    assert "author_id" not in body["features"][0]
+    assert "secret-uuid" not in json.dumps(body)
+
+
+async def test_r39_a_split_parent_is_a_pipeline_card_not_a_held_one(
+    make_client, fake_supabase
+) -> None:
+    """Holding means blocked. A split was broken into parts people can vote for."""
+    fake_supabase.rows[TABLE_FEATURE_REQUESTS] = _family()
+
+    pipeline = make_client().get("/api/features?view=pipeline").json()
+    assert PARENT_ID in {f["id"] for f in pipeline["features"]}
+
+    holding = make_client().get("/api/features?view=holding").json()
+    assert PARENT_ID not in {f["id"] for f in holding["features"]}

@@ -49,6 +49,23 @@ exposes **no** public close in this version — let it be garbage-collected. Nev
 `supabase.auth.sign_out()` to "close" it: that is a network round-trip ending a user session, and
 a service-role client has none.
 
+## Database views
+
+`public.feature_shipped_meta` — one row per shipped feature, its most recent deployment.
+Its columns are **not** named after the wire fields they populate:
+
+| view column | wire field |
+|---|---|
+| `feature_id` | (join key) |
+| `version` | `Feature.shipped_version` |
+| `deployed_at` | `Feature.shipped_at` |
+| `preview_url` | — |
+
+Selecting `shipped_version` or `shipped_at` from this view raises
+`42703: column feature_shipped_meta.shipped_version does not exist`. The view flattens
+`deployments.shipped_feature_ids` (a jsonb array, so PostgREST cannot embed it) into a keyed read;
+`schema.sql` is the definition.
+
 ## Database functions (called via `supabase.rpc`)
 
 PostgREST resolves a function by its exact named-argument set, so a guessed extra parameter fails

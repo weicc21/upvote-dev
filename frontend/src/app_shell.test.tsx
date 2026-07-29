@@ -48,7 +48,7 @@ function feature(over: Partial<Feature> = {}): Feature {
     split_depth: 0, unlock_threshold: null, extends_id: null, extends_title: null,
     postpone_count: 0, ai_explanation: null, merge_count: null,
     shipped_version: null, shipped_at: null, viewer_has_voted: false,
-    children: [], created_at: '2026-07-28T00:00:00Z', updated_at: null,
+    children: [], created_at: new Date(Date.now() - 3 * 3600_000).toISOString(), updated_at: null,
     ...over,
   };
 }

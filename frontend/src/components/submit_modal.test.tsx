@@ -240,14 +240,18 @@ describe('R8/R9 — a rejected pitch keeps its text', () => {
 // ===========================================================================
 
 describe('R10 — out of coins is a schedule, not an error', () => {
-  const outOfCoins: PitchOk = {
+  // Relative, never a wall-clock literal: an absolute deadline silently expires
+  // and the component then — correctly — clears the out-of-coins state, which
+  // reads as a component regression months after the test was written.
+  const inAnHour = () => new Date(Date.now() + 3600_000).toISOString();
+  const outOfCoins = (): PitchOk => ({
     ok: false, status: 429, code: 'out_of_coins',
     message: 'You have used all your Pitch Coins for today. Try again tomorrow.',
-    resets_at: '2026-07-29T00:00:00+00:00',
-  };
+    resets_at: inAnHour(),
+  });
 
   it('shows the out-of-coins copy', async () => {
-    setup({ onPitch: vi.fn(async () => outOfCoins) });
+    setup({ onPitch: vi.fn(async () => outOfCoins()) });
     const user = await fillValid();
     await user.click(submitButton());
     await waitFor(() => expect(document.body.textContent).toMatch(/coins refresh/i));
@@ -267,7 +271,7 @@ describe('R10 — out of coins is a schedule, not an error', () => {
   });
 
   it('R13: cannot pitch at all with an empty balance', async () => {
-    const { onPitch } = setup({ coinsRemaining: 0, resetsAt: '2026-07-29T00:00:00+00:00' });
+    const { onPitch } = setup({ coinsRemaining: 0, resetsAt: inAnHour() });
     const user = userEvent.setup();
     const inputs = screen.queryAllByRole('textbox');
     if (inputs.length) {

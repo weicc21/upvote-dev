@@ -223,37 +223,39 @@ def test_r16_no_vendor_or_absolute_path_is_hard_coded() -> None:
 
 
 def test_r13_blueprint_is_cached(tmp_path: pathlib.Path) -> None:
-    """Read once, not per pitch — the file only changes when a sprint compiles."""
-    from orchestrator import architect as A
+    """Read once, not per pitch — the file only changes when a sprint compiles.
 
+    Driven entirely through the public signature: a test that clears a private
+    cache attribute breaks on every regeneration that renames it, which is what
+    happened when the sprint-stage entry point was added.
+    """
     f = tmp_path / "bp.prompt"
     f.write_text("BLUEPRINT ONE")
-    A._cached_blueprint_text.cache_clear()
-    assert load_blueprint(f) == "BLUEPRINT ONE"
+    assert load_blueprint(f, refresh=True) == "BLUEPRINT ONE"
     f.write_text("CHANGED ON DISK")
     assert load_blueprint(f) == "BLUEPRINT ONE", "second call re-read the file"
-    A._cached_blueprint_text.cache_clear()
+
+
+def test_r34_refresh_bypasses_the_cache(tmp_path: pathlib.Path) -> None:
+    """Sprint-stage buildability must judge the app as it is now, not at boot."""
+    f = tmp_path / "bp.prompt"
+    f.write_text("BLUEPRINT ONE")
+    assert load_blueprint(f, refresh=True) == "BLUEPRINT ONE"
+    f.write_text("GREW SINCE INTAKE")
+    assert load_blueprint(f, refresh=True) == "GREW SINCE INTAKE"
 
 
 def test_r14_missing_blueprint_raises_clearly(tmp_path: pathlib.Path) -> None:
     """Judging against nothing would green-light every feature."""
-    from orchestrator import architect as A
-
-    A._cached_blueprint_text.cache_clear()
     with pytest.raises(Exception):
-        load_blueprint(tmp_path / "does_not_exist.prompt")
-    A._cached_blueprint_text.cache_clear()
+        load_blueprint(tmp_path / "does_not_exist.prompt", refresh=True)
 
 
 def test_r14_empty_blueprint_is_rejected(tmp_path: pathlib.Path) -> None:
-    from orchestrator import architect as A
-
     f = tmp_path / "empty.prompt"
     f.write_text("   \n")
-    A._cached_blueprint_text.cache_clear()
     with pytest.raises(Exception):
-        load_blueprint(f)
-    A._cached_blueprint_text.cache_clear()
+        load_blueprint(f, refresh=True)
 
 
 def test_module_does_no_db_or_queue_io() -> None:

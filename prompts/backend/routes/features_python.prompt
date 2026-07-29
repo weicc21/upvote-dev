@@ -27,6 +27,7 @@ This module DOES NOT call an LLM, ever.
 </non_responsibilities>
 
 <vocabulary>
+Valid: of a pitch, one whose cleaned title and description both fall inside the bounds in the frozen request schema and contain no markup. Validity is decided before a coin is spent, and the backend's answer overrides the client's.
 **Pitch Coin** — one unit of an author's daily submission allowance, counted at `rate:pitch:{author_id}`.
 **Board row** — a row in `feature_requests`. A pitch becomes one only after it survives screening.
 </vocabulary>
@@ -108,6 +109,13 @@ R30 (MUST): Embed a `SPLIT` parent's children in its `children` array, ordered o
 R31 (MUST): Keep returning a child directly from `GET /api/features/{feature_id}` and from `/api/features/mine` when it is the row asked for. Root-only is a rule about *lists*; an author who split a pitch must still find its children in their own tray (US-06).
 R32 (MUST): Fetch children with one query for the whole page, not one per parent. A page of 30 split parents would otherwise issue 31 round-trips on the hottest read in the product.
 R33 (MUST): Always include `children` as a list on every feature in a list response — an empty list when the row has no children, never null and never absent. The frontend maps over it directly, so an omitted key forces every card to guard a field the schema already describes as a list.
+
+R34 (MUST): Return **every** field of the `Feature` schema on every feature in every response, embedded children included: `id, title, description, status, upvotes, author_handle, parent_id, split_depth, unlock_threshold, extends_id, extends_title, postpone_count, ai_explanation, merge_count, shipped_version, shipped_at, viewer_has_voted, children, created_at, updated_at`. A narrower projection silently disables whole features that are already built and tested against fixtures: `ai_explanation` missing empties the Holding Pattern's "Why the pause" panel, which is the only account the community ever gets of why their feature was held; `merge_count` and `extends_title` missing erase the visible evidence that dedup merged pitches rather than losing them; `unlock_threshold` missing blanks every unlock-tree progress bar. This has already shipped once — the projection listed ten of the twenty fields and no test noticed, because the component tests use fixtures rather than the live endpoint.
+R35 (MUST NOT): Widen that projection to include `author_id`. R6 still holds: the full Feature schema is the target, and `author_id` is not in it.
+R36 (MUST): Resolve `shipped_version` and `shipped_at` from the `feature_shipped_meta` view rather than from `feature_requests`, which has no such columns. The view's own columns are `feature_id, version, preview_url, deployed_at` — **`version` populates `shipped_version` and `deployed_at` populates `shipped_at`**. Selecting the wire names straight from the view raises `42703: column does not exist`; that is not a hypothetical, it is what a previous generation did. They are null for anything that has not shipped.
+R37 (MUST): Compute `viewer_has_voted` per row from `feature_votes` for the identified viewer, in **one** query for the whole page rather than one per row, and return `false` for an anonymous reader rather than null. It is what stops a returning visitor being invited to click a control that will answer `409`; defaulting it to false for everyone makes the board lie to exactly the people who already participated.
+R39 (MUST): Map the four views to statuses exactly: `pipeline` → `VOTING, CONSOLIDATING, IN_SPRINT, SPLIT`; `shipped` → `COMPILED`; `holding` → `POSTPONED_CONFLICT`; `vault` → `ARCHIVED`. A `SPLIT` parent belongs on the **pipeline**: its children are open for voting and the unlock tree is a pipeline interaction. Filing it under holding tells the community their idea was blocked when in fact it was broken into parts they can vote for — the opposite message. This mapping has already drifted once during a regeneration, unpinned, and no rule caught it.
+R38 (MUST): Apply R34, R36, and R37 to `GET /api/features/{feature_id}` and to `/api/features/mine` as well. One shape means one renderer — a card that carries its explanation on the board but loses it in the author's own tray is the kind of inconsistency that gets fixed by adding a second code path.
 </contract_rules>
 
 <pdd>
@@ -173,4 +181,10 @@ R30: story__browse_the_pipeline_board.md
 R31: story__browse_the_pipeline_board.md
 R32: story__browse_the_pipeline_board.md
 R33: story__browse_the_pipeline_board.md
+R34: docs/user_stories/story__threshold_triggers_a_sprint.md
+R35: docs/user_stories/story__browse_the_pipeline_board.md
+R36: docs/user_stories/story__preview_the_shipped_feature.md
+R37: docs/user_stories/story__upvote_a_feature.md
+R38: docs/user_stories/story__track_my_pitches.md
+R39: docs/user_stories/story__browse_the_pipeline_board.md
 </coverage>

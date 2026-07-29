@@ -45,8 +45,13 @@ contexts:
       - "prompts/frontend/**"
     defaults:
       generate_output_path: "frontend/src/"
-      test_output_path: "frontend/src/__tests__/"
-      example_output_path: "frontend/src/examples/"
+      # Tests sit beside the module they cover (React/Vitest convention), so a
+      # generated test lands next to the hand-written ones rather than starting
+      # a second suite under __tests__/. Subpaths mirror as with generate:
+      #   prompts/frontend/components/x_typescriptreact.prompt
+      #     -> frontend/src/components/x.tsx + x.test.tsx
+      test_output_path: "frontend/src/"
+      example_output_path: "frontend/examples/"
       default_language: "typescriptreact"
       strength: 0.818
       temperature: 0.0

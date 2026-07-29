@@ -5,8 +5,11 @@
   {"name":"Friction","signature":"class Friction(StrEnum)","returns":"green, yellow, red"},
   {"name":"Shape","signature":"@dataclass(frozen=True) class Shape","returns":"feature_id: str; friction: Friction; status: FeatureStatus; children: tuple[ChildSpec, ...]; explanation: str"},
   {"name":"ChildSpec","signature":"@dataclass(frozen=True) class ChildSpec","returns":"title: str; description: str"},
-  {"name":"load_blueprint","signature":"def load_blueprint(path: Path | None = None) -> str","returns":"the target app's prompt file text, read once and cached"},
+  {"name":"load_blueprint","signature":"def load_blueprint(path: Path | None = None, *, refresh: bool = False) -> str","returns":"the target app's prompt file text, read once and cached"},
   {"name":"decide_shape","signature":"async def decide_shape(pitch: Mapping[str, Any], *, blueprint: str, judge: Judge | None = None) -> Shape","returns":"the shape decision; falls back to VOTING when no decision can be obtained"},
+  {"name":"BuildVerdict","signature":"@dataclass(frozen=True) class BuildVerdict","returns":"feature_id: str; buildable: bool; friction: Friction; explanation: str"},
+  {"name":"BuildabilityUnavailable","signature":"class BuildabilityUnavailable(Exception)","returns":"raised when no buildability verdict could be obtained"},
+  {"name":"assess_buildability","signature":"async def assess_buildability(feature: Mapping[str, Any], *, blueprint: str, judge: Judge | None = None) -> BuildVerdict","returns":"the sprint-stage verdict; raises BuildabilityUnavailable rather than guessing"},
   {"name":"Judge","signature":"Judge = Callable[[str, str], Awaitable[str]]","returns":"injected seam: (system_prompt, user_prompt) -> raw model text"}
 ]}}
 </pdd-interface>
@@ -14,8 +17,9 @@
 <pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
 <pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
 
-Implement `orchestrator/architect.py`. This is `decide_shape` only — the intake half of US-08.
-`build_spec`, which writes the feature block at sprint time, is a later module.
+Implement `orchestrator/architect.py`. It has **two entry points at two pipeline stages**:
+`decide_shape` at intake (US-08) and `assess_buildability` at sprint selection (US-07).
+`build_spec`, which writes the feature block for the compiler, is still a later module.
 
 <responsibility>
 Decide whether a pitch can be built into the target app as it stands, must be broken up first, or conflicts with what the app has already committed to.
@@ -30,6 +34,7 @@ This module DOES NOT decide what gets built; it decides what the community may v
 </non_responsibilities>
 
 <vocabulary>
+Reasonable: of a voter, one who wants a working app rather than a particular implementation. The test in R23 is whether such a person could want one part of a pitch and not another, not whether a pedantic reader could invent a distinction.
 **Blueprint** — the target app's own prompt file, at `${TARGET_PROMPT_DIR}/streaks_demo_typescriptreact.prompt`. It declares the app's binding architecture constraints, its committed UI paradigm, and its existing features, so it is the only authority on what "conflicts" means.
 **Friction** — how hard a feature is to add to the app as it stands. `green` is additive, `yellow` needs care but fits, `red` cannot be built without breaking something the app has committed to.
 **Shape** — the status the feature should enter the board with: `VOTING` (vote on it), `SPLIT` (vote on its pieces), `POSTPONED_CONFLICT` (do not vote on it yet).
@@ -74,6 +79,15 @@ R27 (MUST): Pose two separate questions in the system prompt, in order, and requ
 R28 (MUST): Make question (2) concrete — instruct the model to **enumerate the distinct capabilities a voter could want separately, then set `too_large` true when that list has two or more entries**. Counting is checkable and hard to skip; "is it too large" invites a judgement the model has already anchored on green.
 R29 (MUST): State in the system prompt that `green` friction says nothing about size — a perfectly additive pitch is still split when it bundles separable wants. Without this the model treats "fits cleanly" as "ship it as one card".
 R30 (MUST): Read the pitch's identifier from the key `feature_id`, and echo it onto the `Shape`. That is the key the intake envelope carries end to end — `id` is the *board row's* column name, not the payload's, and reading it raises `KeyError` on every real item.
+
+R31 (MUST): Expose `assess_buildability` as the **sprint-stage** entry point, asking a different question from `decide_shape`: not "is this one votable thing?" but "can this be built into the app as it stands right now, in one regeneration, without undoing a decision already made?" A feature the community voted for days ago meets a blueprint that has since grown, so the intake verdict is stale by construction and MUST NOT be reused in its place.
+R32 (MUST): State that question, in those terms, **in the sprint-stage system prompt** — not only in this contract. A rule the model is never told is a rule the model cannot follow; this has already cost three separate defects in this pipeline.
+R33 (MUST): Return `buildable` true for `green` and `yellow` friction and false for `red`. `yellow` means awkward, not impossible, and holding every awkward feature would stall the board on exactly the ambitious work the demo exists to show.
+R34 (MUST): Read the blueprint **fresh** at sprint time via `load_blueprint(..., refresh=True)`, bypassing the cache `decide_shape` populates. The cached text is whatever the app looked like when the daemon started; judging buildability against a stale blueprint answers a question about an app that no longer exists.
+R35 (MUST): Raise `BuildabilityUnavailable` when no verdict can be parsed, and MUST NOT fall back to a verdict of either kind. This is the **opposite** of `decide_shape`'s fail-open (R9), and deliberately: at intake a missing verdict costs a shaping decision on a pitch nobody has voted for yet, while here it would either hold a feature the community won — blaming them for an outage — or send unbuildable work to a compile. Neither is recoverable from the board.
+R36 (MUST): Carry the architect's own words in `explanation`, written for the community rather than for a log. It becomes the Holding Pattern card's "🤖 Why the pause" copy, which is the only account anyone gets of why their winning feature did not get built.
+R37 (MUST NOT): Split, re-shape, or propose children at sprint selection. The community voted on a specific card; changing its shape after the vote invalidates the mandate the vote conferred. Shaping belongs at intake, before anyone has voted.
+R38 (MUST): Use `LLM_MODEL_ARCHITECT` for both entry points and MUST NOT introduce a second model constant. One agent, one pin — a sprint judged by a different model from the one that shaped the pitch would apply a different standard at each end of the same feature's life.
 </contract_rules>
 
 <pdd>
@@ -134,4 +148,12 @@ R27: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R28: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R29: docs/user_stories/story__architect_writes_acceptance_criteria.md
 R30: docs/user_stories/story__pitch_a_feature.md
+R31: docs/user_stories/story__threshold_triggers_a_sprint.md
+R32: docs/user_stories/story__threshold_triggers_a_sprint.md
+R33: docs/user_stories/story__threshold_triggers_a_sprint.md
+R34: docs/user_stories/story__threshold_triggers_a_sprint.md
+R35: docs/user_stories/story__threshold_triggers_a_sprint.md
+R36: docs/user_stories/story__threshold_triggers_a_sprint.md
+R37: docs/user_stories/story__threshold_triggers_a_sprint.md
+R38: docs/user_stories/story__threshold_triggers_a_sprint.md
 </coverage>

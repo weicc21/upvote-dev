@@ -1,0 +1,118 @@
+<pdd-reason>The gate that turns votes into work. It is the only place in the system where community demand becomes a build decision, and the only place a feature leaves `VOTING` for a reason other than an agent reshaping it.</pdd-reason>
+
+<pdd-interface>
+{"type":"module","module":{"functions":[
+  {"name":"SprintOutcome","signature":"@dataclass(frozen=True) class SprintOutcome","returns":"selected: tuple[str, ...]; held: tuple[str, ...]; deferred: tuple[str, ...]; rolled_back: tuple[str, ...]; archived: tuple[str, ...]"},
+  {"name":"SprintInFlight","signature":"class SprintInFlight(Exception)","returns":"raised when another sprint already holds the lock"},
+  {"name":"run_sprint","signature":"async def run_sprint(supabase: AsyncClient, redis: Redis, *, judge: Judge | None = None) -> SprintOutcome","returns":"one sprint: select, gate, transition, then end-of-sprint maintenance"},
+  {"name":"main","signature":"def main() -> None","returns":"entry point — one sprint per SPRINT_CADENCE_SECONDS until interrupted"}
+]}}
+</pdd-interface>
+
+<pdd-dependency>prompts/shared/constants_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/shared/config_python.prompt</pdd-dependency>
+<pdd-dependency>prompts/orchestration/architect_python.prompt</pdd-dependency>
+
+Implement `orchestrator/sprint_service.py`. It is a scheduled worker, not an ASGI app: it reads and
+writes Postgres through `supabase-py`, takes a lock in Redis, and calls the architect. It is invoked
+by `main()` on a cadence, or by `scripts/simulate_sprint.py` calling `run_sprint` directly.
+
+<responsibility>
+Select the features the community has voted over the threshold, confirm each can still be built, and move them into a sprint — one sprint at a time.
+</responsibility>
+
+<non_responsibilities>
+This module DOES NOT call an LLM directly. Every judgement goes through `architect.assess_buildability`, which owns the model pin and the prompt.
+This module DOES NOT compile, write to `TARGET_PROMPT_DIR`, or deploy. It selects and transitions; US-09 builds.
+This module DOES NOT screen, dedup, or reshape. Those happened at intake, before anyone voted.
+This module DOES NOT read or write pitch content in Redis. It works only from rows already in Postgres.
+This module DOES NOT expose an HTTP route. There is no public trigger by design (US-07).
+</non_responsibilities>
+
+<vocabulary>
+Sprint: one pass of selection, gating, and transition. It is bounded and non-overlapping — at most one runs at any moment, across every process.
+Threshold: `settings.UPVOTE_THRESHOLD`, the vote count at or above which a feature becomes eligible. The demo overrides it in `.env`; the code never hardcodes a number.
+Gate: the architect's sprint-stage buildability check. Passing it is what separates "the community wants this" from "we are going to build this".
+Deferred: a feature left in `VOTING` because the gate could not be reached, as opposed to *held*, which means the architect actively said no.
+</vocabulary>
+
+<capabilities>
+- MAY read and write `feature_requests` through the injected Supabase client.
+- MAY take, hold, and release a Redis lock.
+- MAY call `architect.assess_buildability` and `architect.load_blueprint`.
+- MUST NOT call an LLM, `fetch`, or any HTTP endpoint of this system.
+- MUST NOT construct its own Supabase or Redis client outside `main()`.
+</capabilities>
+
+<contract_rules>
+R1 (MUST): Guard the whole sprint with a Redis lock taken by `SET key value NX EX <ttl>`, and release it in a `finally` so a crash mid-sprint cannot wedge the system permanently. The TTL is the backstop; the `finally` is the normal path.
+R2 (MUST): Raise `SprintInFlight` when the lock is already held, and MUST NOT wait, queue, or retry. Two concurrent sprints can select the same feature and compile it twice, which is the one failure this whole module exists to prevent — and a caller that blocks makes a stuck lock look like a hang instead of a refusal.
+R3 (MUST): Select only rows whose status is `VOTING` and whose `upvotes` are **at or above** `settings.UPVOTE_THRESHOLD`, ordered by `upvotes` descending, capped at a module-level capacity that defaults to **1**. "At or above" is the story's wording; a strict `>` silently moves the bar by one vote and makes the threshold a lie.
+R3a (MUST): Default the capacity to one winner per sprint. The build step appends the winning feature to the target app's prompt and regenerates the whole app, so selecting several in one cycle means several compiles contending for one prompt file and one sandbox. The constant stays a constant rather than a literal so a test can raise it to exercise the multi-feature paths.
+R3b (MUST NOT): Track, queue, or remember a deferred feature between sprints. The selected feature leaves `VOTING`, so the eligible pool drains from the top and a deferred feature becomes the next candidate by itself. Remembering it in Redis would add a correctness dependency on exactly the infrastructure whose failure caused the deferral.
+R4 (MUST): Treat split children as eligible in their own right. They are votable `VOTING` rows, and the whole point of splitting a feature was to let the community fund its parts separately.
+R5 (MUST): Return a `SprintOutcome` recording that the sprint ran when nothing qualifies, and MUST NOT raise. A quiet week is a normal outcome, not an error, and a cadence that raises on an empty board fills the log with false alarms.
+R6 (MUST): Load the blueprint **once per sprint** with `load_blueprint(refresh=True)` and pass that text to every gate call. Re-reading per feature multiplies file I/O for a file that cannot change mid-sprint, and reusing the cached copy judges against a stale app (architect R34).
+R7 (MUST): Call `architect.assess_buildability` for every selected feature, and gate on its verdict. The intake verdict MUST NOT be reused — it answered a different question about an older blueprint.
+R8 (MUST): Move a feature the gate passes to `IN_SPRINT`.
+R9 (MUST): Move a feature the gate fails to `POSTPONED_CONFLICT`, write the architect's `explanation` to `ai_explanation`, and increment `postpone_count`. The explanation is the only account the community ever gets of why the feature they won did not get built; a hold with a null reason reads as the system losing it.
+R10 (MUST): Leave a feature in `VOTING` when `BuildabilityUnavailable` is raised, record it as **deferred**, and MUST NOT hold it. An outage is the system's fault, and marking a feature `POSTPONED_CONFLICT` tells the community their idea was rejected on the architecture's merits when in fact nothing judged it.
+R11 (MUST): Keep going after a single feature's gate fails or errors — one bad row MUST NOT abandon the rest of the sprint. The features are independent and the community voted for all of them.
+R12 (MUST): Write each transition conditioned on the row still being in the status it was selected in, so a feature changed by another process between selection and write is skipped rather than overwritten. Selection and write are not atomic and the daemon is concurrently editing the same table.
+R13 (MUST): Run end-of-sprint maintenance in the same pass: roll `IN_SPRINT` rows older than the rollback window back to `VOTING`, and decay `VOTING` rows that are older than the decay window and still below the threshold to `ARCHIVED`. Without the decay the Vault is permanently empty and the board only ever grows.
+R14 (MUST NOT): Archive a feature that is at or above the threshold, however old. It is waiting for capacity, not for interest.
+R15 (MUST): Publish one `agent_events` message per phase to Redis — sprint started, each selection or hold, sprint finished — carrying phase and micro-copy only. That is the feed US-11's ticker consumes, and it is the only way a watcher sees the sprint happen. Pitch content MUST NOT appear in it.
+R16 (MUST): Take the Supabase and Redis clients as arguments rather than constructing them, so a test drives the whole sprint against fakes with no network. Only `main()` builds real clients.
+R17 (MUST): Accept an injected `judge` and pass it through to the architect, so a test can gate features without an LLM.
+R18 (MUST): Have `main()` run one sprint per `settings.SPRINT_CADENCE_SECONDS`, handle `SIGINT`/`SIGTERM` for a clean shutdown, close the Redis client with `aclose()`, and MUST NOT call `supabase.auth.sign_out()`.
+R19 (MUST): Log every transition with the feature id and the reason, at info. A sprint that moves seven features and says nothing is unauditable, and this is the step with no human in the loop.
+R20 (MUST NOT): Delete a row, ever. Every terminal state in this system is a status, so that the Vault can hold what the sprint passed over and a reboot can bring it back (US-16).
+</contract_rules>
+
+<pdd>
+**The lock key, capacity, and maintenance windows are module-local constants, not shared ones.**
+Nothing outside this module takes the sprint lock or knows what a sprint's capacity is, and adding
+them to `shared/constants.py` would force a regeneration of a module every service imports in order
+to add names only this one uses. If a second consumer ever needs the lock — a status endpoint, say —
+they move to `shared/constants.py` at that point.
+
+**The gate runs serially, one architect call per selected feature.** Capacity is small and each call
+is a MiniMax round-trip; parallelising would make the sprint faster and the token spend spikier,
+which is the wrong trade for a demo whose whole point is being watched.
+
+**`SprintOutcome` distinguishes `held` from `deferred` deliberately.** They look identical on the
+board — the feature is simply not in a sprint — but one is a decision and the other is an outage,
+and only the second is worth retrying unchanged next cadence.
+</pdd>
+
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+<include optional>shared/constants.py</include>
+<include optional>shared/config.py</include>
+<include optional>orchestrator/architect.py</include>
+</dependencies>
+
+<coverage>
+R1: docs/user_stories/story__threshold_triggers_a_sprint.md
+R2: docs/user_stories/story__threshold_triggers_a_sprint.md
+R3: docs/user_stories/story__threshold_triggers_a_sprint.md
+R3a: docs/user_stories/story__threshold_triggers_a_sprint.md
+R3b: docs/user_stories/story__threshold_triggers_a_sprint.md
+R4: docs/user_stories/story__prioritise_an_overwhelming_backlog.md
+R5: docs/user_stories/story__threshold_triggers_a_sprint.md
+R6: docs/user_stories/story__threshold_triggers_a_sprint.md
+R7: docs/user_stories/story__threshold_triggers_a_sprint.md
+R8: docs/user_stories/story__threshold_triggers_a_sprint.md
+R9: docs/user_stories/story__architect_writes_acceptance_criteria.md
+R10: docs/user_stories/story__threshold_triggers_a_sprint.md
+R11: orchestrator/tests/test_sprint_service.py
+R12: orchestrator/tests/test_sprint_service.py
+R13: docs/user_stories/story__threshold_triggers_a_sprint.md
+R14: docs/user_stories/story__threshold_triggers_a_sprint.md
+R15: docs/user_stories/story__watch_the_agents_work.md
+R16: orchestrator/tests/test_sprint_service.py
+R17: orchestrator/tests/test_sprint_service.py
+R18: docs/user_stories/story__threshold_triggers_a_sprint.md
+R19: docs/user_stories/story__decision_log.md
+R20: docs/user_stories/story__reboot_an_archived_request.md
+</coverage>
