@@ -8,8 +8,8 @@ back to the voters as a running app they can click.
 Built for the [PromptDriven hackathon](https://promptdriven.ai/hackathon/61bd4739-4ae6-421c-8bb9-d61940e5243f).
 
 > **The source of this project is prompts, not code.** The `.prompt` files under `prompts/` are
-> compiled into the Python and TypeScript you run. A fresh clone has no `backend/`,
-> `orchestrator/`, `frontend/`, or `shared/` directory until you generate them — see step 5.
+> compiled into the Python and TypeScript you run. Codes under `backend/`,
+> `orchestrator/`, `frontend/`, or `shared/` directory are example of artifacts from current prompts and should not be modified in place — see step 5.
 > How that works, and how to change it, is in **[`prompts/README.md`](prompts/README.md)**.
 
 ## Architecture
@@ -104,7 +104,7 @@ Append-only matters: Redis holds the only copy of a pitch between submission and
 
 ### 5. Generate the code
 
-Nothing runs until the prompts are compiled:
+Whenever prompts are updated, they should be compiled first before running:
 
 ```bash
 export PDD_COMMAND_MAX_OUTPUT_TOKENS=32000
