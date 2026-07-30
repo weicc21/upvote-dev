@@ -47,7 +47,79 @@ architecture template's guaranteed schema failure against TokenRouter (and how t
 from the log instead of paying twice), and the inverted `filename`/`filepath` fields. Read that
 section first.
 
-Verify a new model id routes before adding it to `~/.pdd/llm_model.csv`:
+Provider-specific failures and their workarounds: [Known issues (TokenRouter)](#known-issues-tokenrouter).
+
+## Known issues (TokenRouter) {#known-issues-tokenrouter}
+
+**Everything below is specific to this project's setup: pdd routing through TokenRouter's
+OpenAI-compatible transport, with models declared in `~/.pdd/llm_model.csv`.** A different provider
+— Anthropic or OpenAI direct, a local Ollama, PDD Cloud — will behave differently, and several of
+these symptoms simply will not occur there. Re-verify rather than assuming, and `--estimate` any
+command shape you have not run before.
+
+Each of these cost at least one wasted run to discover.
+
+### `--estimate` only works on `generate`
+
+`pdd --local --estimate sync <basename>` exits with *"Estimate mode currently supports `generate`
+only."* So the expensive command is the one you cannot price in advance — another reason this
+project generates and hand-writes tests. A single `generate` of a mid-sized module estimates at
+roughly $0.05–$0.25; `.pddrc` scopes `sync` to a $10 budget per invocation.
+
+### The architecture template always fails against TokenRouter
+
+`pdd generate --template architecture/architecture_json` converts the template schema into a strict
+structured-output schema (every property required), sends it to an endpoint that does not enforce
+schemas, then validates the reply against the strict version. Any omitted *optional* field aborts
+the run with `'position' is a required property`. Exit 2, no file written — **but the model output
+is intact in the log.** Always redirect stdout and recover rather than paying twice:
+
+```bash
+pdd generate --template architecture/architecture_json … > run.log 2>&1
+grep "Content attempted for parsing" run.log
+```
+
+Only this template is affected; `generate_prompt` emits prose and is unaffected. Note the recovery
+trick is specific to *this* failure — a generation that fails for another reason (see the surface
+guard below) leaves nothing in the log.
+
+### Reasoning models return empty content at small `max_tokens`
+
+`opus-5` and `fable-5` route fine but spend the output budget on thinking and return empty content
+unless `PDD_COMMAND_MAX_OUTPUT_TOKENS` is generous. This is why 32000 is the floor rather than a
+nicety.
+
+### A non-interactive run hangs on the overwrite prompt
+
+Regenerating over an existing file asks `Overwrite existing files? [Y/n]`. With no TTY — from a
+script, a daemon, or a tool call — it does not fail, it **hangs**. Always pass `--force`. This cost
+a ten-minute timeout that looked exactly like a slow model.
+
+### The public-surface guard blocks intended signature changes
+
+pdd refuses to write when the new output changes a module's public signatures:
+
+```
+Error: Public surface regression for features_python.prompt:
+signature_changed: create_pitch, get_feature, list_features, list_my_pitches
+```
+
+Nothing is written and **the generated code is not recoverable from the log**. When the change is
+intended, move the existing file aside so there is no prior surface to diff against, generate, then
+compare:
+
+```bash
+mv backend/routes/features.py /tmp/features.prev.py
+pdd --local --force generate <prompt> --output backend/routes/features.py
+```
+
+### pdd stages the prompt file in git
+
+A `generate` run inside a git working tree leaves the prompt file **staged**. A rollback that only
+restores the worktree leaves the block sitting in the index; `git reset --hard` clears both, which
+is what `scripts/demo_state.py reset` does.
+
+### Verify a model id routes before adding it
 
 ```bash
 curl -s https://api.tokenrouter.com/v1/chat/completions \
@@ -55,9 +127,12 @@ curl -s https://api.tokenrouter.com/v1/chat/completions \
   -d '{"model":"anthropic/claude-opus-4.6","messages":[{"role":"user","content":"say OK"}],"max_tokens":16}'
 ```
 
+With `strength: 0.818` pdd interpolates upward by `model_rank_score` and keeps lower-ranked rows as
+automatic fallbacks, so a broken row may be masked by a working one until the fallback also fails.
+
 ## Step 1 — Generate `architecture.json`
 
-The module decomposition is derived from the PRD plus all 15 stories.
+The module decomposition is derived from the PRD plus all 16 stories.
 
 ```bash
 pdd generate --template architecture/architecture_json \
@@ -250,13 +325,32 @@ prompt covers, surfaces here.
 
 ## Step 8 — Generate code and tests
 
+`sync` runs generate → example → test → verify → fix, honouring the `target_coverage`, `budget` and
+`max_attempts` in `.pddrc`:
+
 ```bash
 pdd sync contracts --dry-run     # inspect the plan first
 pdd sync contracts               # then per module, in architecture.json priority order
 ```
 
-`sync` runs generate → example → test → verify → fix, honouring the `target_coverage`,
-`budget`, and `max_attempts` in `.pddrc`.
+**This project does not use `sync`.** It generates, then writes tests by hand:
+
+```bash
+pdd --local --force --estimate generate <prompt> --output <file>   # price it first
+pdd --local --force generate <prompt> --output <file>
+```
+
+Three reasons, all learned the expensive way:
+
+- **`sync` cannot be priced.** `--estimate` supports `generate` only, and `.pddrc` scopes `sync` to
+  a `$10` budget per invocation — roughly 200× a single `generate`.
+- **Its fix loop burned the budget on correct code.** Two `sync` runs failed here because pdd chose
+  a Python interpreter with no pytest, so every test "failed" and `fix` spent its whole retry budget
+  repairing code that was already right. (`source .venv/bin/activate` first — see the interpreter
+  note in `CLAUDE.md`.)
+- **Hand-written tests are where the design gets checked.** Several defects in this codebase were
+  found by writing a test that asserted what a contract rule *said*, then watching the generated
+  code fail it. A generated test tends to assert what the code already does.
 
 ## The standing rule
 

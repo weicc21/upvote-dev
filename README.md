@@ -120,14 +120,35 @@ Append-only matters: Redis holds the only copy of a pitch between submission and
 
 ### 5. Generate the code
 
-Whenever prompts are updated, they should be compiled first before running:
+Prompts are source; the code in `backend/`, `orchestrator/`, `shared/` and `frontend/src/` is
+generated output. When a prompt changes, regenerate rather than hand-editing the file.
 
 ```bash
 export PDD_COMMAND_MAX_OUTPUT_TOKENS=32000
-pdd sync constants          # then each module in architecture.json priority order
+pdd --local --force --estimate generate <prompt> --output <file>   # price it first
+pdd --local --force generate <prompt> --output <file>              # then run it
 ```
 
-Full instructions, ordering, and cost controls: **[`prompts/README.md`](prompts/README.md)**.
+**pdd runs locally against TokenRouter.** Four things about that setup are not obvious:
+
+- **Models live in `~/.pdd/llm_model.csv`, not in environment variables.** `PDD_MODEL` and
+  `PDD_PROVIDER` are ignored unless a matching row exists. Ids look like
+  `openai/anthropic/claude-opus-4.6` because routing goes through TokenRouter's OpenAI-compatible
+  transport, and `base_url` comes from that CSV — `TOKENROUTER_BASE_URL` in `.env` is unused.
+- **`TOKENROUTER_API_KEY` is the credential every row names.** pdd resolves `.env` relative to its
+  own working directory, so a command run outside this repo finds no key and fails with
+  `All candidate models failed`. Anything that shells out to pdd must inject it explicitly —
+  `orchestrator/publisher.py` and `orchestrator/compiler.py` both do.
+- **`export PDD_COMMAND_MAX_OUTPUT_TOKENS=32000` is required.** Unset, pdd sends no `max_tokens`
+  and inherits the provider ceiling, truncating long output mid-file. Despite the name it *raises*
+  the cap.
+- **Prefer `generate` over `sync`.** `sync` adds example generation, test generation, verification
+  and a fix loop — `.pddrc` scopes it to a $10 budget per invocation, roughly 200× a single
+  `generate`. This project generates, then writes tests by hand (Claude) in the interest of budget and speed
+
+Known failures specific to TokenRouter, and how to work around each:
+**[`docs/pdd-prompt-authoring.md`](docs/pdd-prompt-authoring.md#known-issues-tokenrouter)**.
+Ordering and cost controls: **[`prompts/README.md`](prompts/README.md)**.
 
 ## Running the services
 
@@ -178,9 +199,18 @@ Whatever you point at has to satisfy three things:
    pipeline at your own app you either name its prompt exactly that, or change the filename in
    `prompts/orchestration/architect_python.prompt` and regenerate. The directory is configurable;
    the filename is not.
-2. **A `COMPILE_COMMAND` that matches your prompt's basename.** The default `pdd sync streaks_demo`
-   names the module, so a different prompt needs a different command. `pdd` must be installed and
-   authenticated in the orchestrator's environment.
+2. **A `COMPILE_COMMAND` naming your prompt and its output.** For this target:
+
+   ```
+   COMPILE_COMMAND="pdd --local --force generate streaks_demo_typescriptreact.prompt --output streaks_demo.tsx"
+   ```
+
+   `--force` matters: without it pdd asks `Overwrite existing files?` and, with no TTY, hangs rather
+   than failing. `generate` rather than `sync` keeps a compile at cents instead of the `$10` budget
+   `.pddrc` scopes `sync` to. The compiler injects `PDD_COMMAND_MAX_OUTPUT_TOKENS` and
+   `TOKENROUTER_API_KEY` into the subprocess itself, so neither needs to be exported in the
+   orchestrator's shell — pdd resolves `.env` from *its own* working directory, which is the target
+   repo, and that repo has no `.env`.
 3. **A `deploy.sh` honouring `SKIP_COMPILE` and `SKIP_PUSH`.** The publisher invokes the target
    repo's own script with `SKIP_COMPILE=1` (the compiler already produced the source) and strips
    `SKIP_PUSH` from the child environment so a daemon launched from a shell that exported it still
