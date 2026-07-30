@@ -80,11 +80,15 @@ function Byline({
   authorHandle: string | null;
   createdAt: string;
 }): JSX.Element | null {
-  // R21: omit byline entirely when handle is null
-  if (!authorHandle) return null;
+  // R3a: the timestamp is independent of the handle. Bundling them meant an
+  // account-less pitch lost its "3h ago" too, so the card read as having no
+  // history at all beside seeded rows with full bylines. R21 still holds:
+  // omit the *handle* when null, never a placeholder.
+  if (!createdAt) return null;
   return (
     <span className="card-byline">
-      {authorHandle} · {relativeTime(createdAt)}
+      {authorHandle ? `${authorHandle} · ` : ""}
+      {relativeTime(createdAt)}
     </span>
   );
 }

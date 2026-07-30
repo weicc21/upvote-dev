@@ -438,3 +438,26 @@ describe('R23 — keyboard operable', () => {
     expect(container.querySelectorAll('div[onclick]')).toHaveLength(0);
   });
 });
+
+
+// ===========================================================================
+// R3a — the timestamp does not depend on having a handle
+// ===========================================================================
+
+describe('R3a — an account-less pitch still shows when it was pitched', () => {
+  it('shows the relative time with no handle, and no placeholder', () => {
+    const { container } = renderCard({ author_handle: null });
+    const byline = container.querySelector('.card-byline');
+    expect(byline).not.toBeNull();
+    expect(byline!.textContent).toMatch(/\d+(m|h|d) ago/);
+    expect(byline!.textContent).not.toMatch(/anonymous|unknown|null|·/i);
+  });
+
+  it('shows handle · time when a handle exists', () => {
+    const { container } = renderCard({ author_handle: 'keen.cedar61' });
+    const byline = container.querySelector('.card-byline')!;
+    expect(byline.textContent).toContain('keen.cedar61');
+    expect(byline.textContent).toContain('·');
+    expect(byline.textContent).toMatch(/\d+(m|h|d) ago/);
+  });
+});

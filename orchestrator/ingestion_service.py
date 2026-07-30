@@ -9,6 +9,7 @@ It never serves HTTP and never imports from ``backend/``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import signal
@@ -38,6 +39,35 @@ from shared.constants import (
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Display handles (R40, R42)
+# ---------------------------------------------------------------------------
+# There are no accounts, so a pitch arrives with an author_id and nothing else.
+# A stable pseudonym is derived from it: the same author always reads the same
+# on the board, and the handle reveals nothing about them.
+
+_HANDLE_ADJECTIVES: Final[tuple[str, ...]] = (
+    "swift", "quiet", "bright", "brave", "clever", "gentle", "keen", "lucky",
+    "mellow", "nimble", "plucky", "sunny", "witty", "zesty", "bold", "calm",
+)
+_HANDLE_NOUNS: Final[tuple[str, ...]] = (
+    "otter", "finch", "maple", "comet", "pebble", "willow", "harbor", "lantern",
+    "meadow", "ember", "cedar", "sparrow", "quartz", "juniper", "beacon", "fern",
+)
+
+
+def derive_author_handle(author_id: str) -> str:
+    """A stable, friendly pseudonym for an account-less author (R40).
+
+    Deterministic so one author reads the same across every pitch, and one-way
+    so the handle cannot be turned back into the id (R42).
+    """
+    digest = hashlib.sha256(author_id.encode("utf-8")).digest()
+    adjective = _HANDLE_ADJECTIVES[digest[0] % len(_HANDLE_ADJECTIVES)]
+    noun = _HANDLE_NOUNS[digest[1] % len(_HANDLE_NOUNS)]
+    return f"{adjective}.{noun}{digest[2] % 100:02d}"
+
 
 # ---------------------------------------------------------------------------
 # Contract: the exact key set every intake item must carry (R2)
@@ -121,6 +151,7 @@ async def _insert_board_row(
     row: dict[str, Any] = {
         "id": item["feature_id"],
         "author_id": item["author_id"],
+        "author_handle": derive_author_handle(item["author_id"]),
         "title": item["title"],
         "description": item["description"],
         "status": status.value,
@@ -358,6 +389,7 @@ async def process_one(raw: str, supabase: AsyncClient, *, blueprint: str) -> str
                 child_row: dict[str, Any] = {
                     "id": child_id,
                     "author_id": item["author_id"],
+                    "author_handle": derive_author_handle(item["author_id"]),
                     "title": child_spec.title[:60],
                     "description": child_spec.description[:300],
                     "status": FeatureStatus.VOTING.value,

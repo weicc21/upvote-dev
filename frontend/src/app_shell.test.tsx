@@ -515,3 +515,61 @@ describe('R31 — reboot goes to the server', () => {
     expect(await screen.findByText(/beat you to it/i)).toBeInTheDocument();
   });
 });
+
+// ===========================================================================
+// R25a — promotion is about the pitch, not about the open tab
+// ===========================================================================
+
+describe('R25a — a pitch stops saying "screening" regardless of what is on screen', () => {
+  const PITCH_ID = 'new-1';
+
+  async function pitchThen(setup: () => Promise<void>) {
+    createFeature.mockResolvedValue({ ok: true, data: { feature_id: PITCH_ID, state: 'screening' } });
+    listFeatures.mockResolvedValue(okBoard([]));
+    render(<AppShell />);
+    await waitFor(() => expect(listFeatures).toHaveBeenCalled());
+
+    await userEvent.click(screen.getByRole('button', { name: /pitch a feature/i }));
+    const inputs = screen.getAllByRole('textbox');
+    await userEvent.type(inputs[0], 'Streak counter on every habit');
+    await userEvent.type(
+      inputs[1],
+      'Show a flame badge with a number on each habit card counting consecutive checked days.',
+    );
+    await userEvent.click(
+      screen.getAllByRole('button').find((b) => /pitch it/i.test(b.textContent ?? ''))!,
+    );
+    await waitFor(() => expect(createFeature).toHaveBeenCalled());
+    await setup();
+    return () =>
+      handlers.onFeatureInsert?.(feature({ id: PITCH_ID, title: 'Streak counter on every habit' }));
+  }
+
+  it('clears while the visitor is on another tab', async () => {
+    const insert = await pitchThen(async () => {
+      await userEvent.click(screen.getByRole('button', { name: /vault/i }));
+    });
+    insert();
+    // The celebration is the observable signal that the entry was promoted.
+    expect(await screen.findByText(/Cleared screening/i)).toBeInTheDocument();
+  });
+
+  it('clears while a stage filter excludes the row', async () => {
+    const insert = await pitchThen(async () => {
+      const chips = Array.from(document.querySelectorAll('.chip'));
+      const building = chips.find((c) => /AI Building/i.test(c.textContent ?? ''));
+      if (building) await userEvent.click(building as HTMLElement);
+    });
+    insert();
+    expect(await screen.findByText(/Cleared screening/i)).toBeInTheDocument();
+  });
+
+  it('does not celebrate a row that was never one of my pitches', async () => {
+    listFeatures.mockResolvedValue(okBoard([]));
+    render(<AppShell />);
+    await waitFor(() => expect(listFeatures).toHaveBeenCalled());
+    handlers.onFeatureInsert?.(feature({ id: 'someone-elses', title: 'Not mine' }));
+    await waitFor(() => expect(listFeatures).toHaveBeenCalled());
+    expect(screen.queryByText(/Cleared screening/i)).not.toBeInTheDocument();
+  });
+});

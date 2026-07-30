@@ -776,3 +776,49 @@ async def test_r39_a_failing_decision_write_does_not_stop_the_pipeline(
     result = await _run(item(), sb)
     assert result == "inserted", "logging broke the pitch it was only supposed to describe"
     assert [i for i in sb.inserts if i["table"] == TABLE_FEATURE_REQUESTS]
+
+
+# ==========================================================================
+# R40 / R41 / R42 — an account-less author still has a name on the board
+# ==========================================================================
+
+async def test_r40_the_insert_carries_a_derived_handle(sb: FakeSupabase) -> None:
+    """Nothing else can supply one: there are no accounts."""
+    assert await _run(item(), sb) == "inserted"
+    row = published(sb)[0]["row"]
+    assert row.get("author_handle"), "the board would show a nameless card"
+
+
+def test_r40_the_handle_is_stable_for_one_author() -> None:
+    """One author must read the same across every pitch they make."""
+    from orchestrator.ingestion_service import derive_author_handle
+
+    author = "9209e0ad-0da1-4ad6-80f4-eb97be3ee661"
+    assert derive_author_handle(author) == derive_author_handle(author)
+
+
+def test_r40_different_authors_generally_differ() -> None:
+    from orchestrator.ingestion_service import derive_author_handle
+
+    handles = {derive_author_handle(f"user-{n:04d}") for n in range(200)}
+    # A small word list collides sometimes; it must not collapse to a handful.
+    assert len(handles) > 150, f"only {len(handles)} distinct handles from 200 authors"
+
+
+def test_r42_the_handle_does_not_leak_the_author_id() -> None:
+    """It is a display name, not a reversible reference to an account."""
+    from orchestrator.ingestion_service import derive_author_handle
+
+    author = "cafe0000-1111-4111-8111-222233334444"
+    handle = derive_author_handle(author)
+    assert author not in handle
+    for chunk in author.split("-"):
+        assert chunk not in handle
+
+
+def test_r41_the_intake_envelope_did_not_grow() -> None:
+    """INTAKE_KEYS is pinned and a producer/consumer test compares it (R2/R28)."""
+    assert svc.INTAKE_KEYS == frozenset(
+        {"feature_id", "author_id", "title", "description", "submitted_at"}
+    )
+    assert "author_handle" not in svc.INTAKE_KEYS

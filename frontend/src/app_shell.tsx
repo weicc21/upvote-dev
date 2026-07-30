@@ -360,6 +360,17 @@ export function AppShell(): JSX.Element {
   useEffect(() => {
     const unsubscribe = subscribe({
       onFeatureInsert: (row) => {
+        // R25a: promotion first, before every guard below. Whether an author's
+        // own pitch is still "screening" is a fact about their pitch, not about
+        // which tab they happen to have open — gating this behind the
+        // parent_id / view / filter guards left the pitch listed as screening
+        // *and* present as a live feature in the same dialog.
+        setLocalPending((prev) => {
+          if (!prev.some((p) => p.feature_id === row.id)) return prev;
+          showToast("🎉 Cleared screening — your pitch is live in the feed!");
+          return prev.filter((p) => p.feature_id !== row.id);
+        });
+
         // R14: branch on parent_id
         if (row.parent_id) {
           // Split child — merge into parent's children
@@ -402,16 +413,6 @@ export function AppShell(): JSX.Element {
         ) {
           return;
         }
-
-        // R25: remove matching pending entry and celebrate
-        setLocalPending((prev) => {
-          const match = prev.find((p) => p.feature_id === row.id);
-          if (match) {
-            showToast("🎉 Cleared screening — your pitch is live in the feed!");
-            return prev.filter((p) => p.feature_id !== row.id);
-          }
-          return prev;
-        });
 
         // Add to feed
         setFeatures((prev) => {

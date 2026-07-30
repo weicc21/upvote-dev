@@ -72,6 +72,7 @@ R22 (MUST): Own both dialogs' open state, pass `api_client.createFeature` as the
 R23 (MUST): On a successful pitch show the screening toast and add a **pending entry** built from the returned `feature_id` and the title the dialog passes back, so the wait is legible in the My Pitches dialog.
 R24 (MUST NOT): Insert the new pitch into the feed, or render any pending entry inline with the board. It is unscreened until the daemon says otherwise, and putting it on the public board is the exact failure screening exists to prevent.
 R25 (MUST): Remove a pending entry when a Realtime insert arrives whose `feature_id` matches it, and celebrate the arrival. That moment — pitch, wait, appear — is the loop the product is selling.
+R25a (MUST): Do this **first in the insert handler, before any guard that can return early** — before the `parent_id` branch, before the current-view check, and before the filter-chip check. Whether an author's own pitch is still "screening" is a fact about their pitch, not about which tab they are looking at. Gating it behind those guards leaves the pitch listed as screening *and* present as a live feature in the same dialog, which is what shipped: the author sees their idea twice and only a page reload fixes it.
 R26 (MUST): Raise the sandbox pulse when the chyron reports its success phase, and clear it when the panel reports a refresh. That is the chain that turns "an agent shipped something" into a visitor actually looking at it.
 R27 (MUST): Render at most one toast at a time in a `toast` with `role="status"`, auto-dismissing after a few seconds, and clear any pending timer on replacement so a fast sequence cannot dismiss the newest message early.
 R28 (MUST NOT): Block first render on the anonymous session. Board reads are anonymous, so the feed must paint before any auth work completes — the session is only needed when someone votes.
@@ -143,6 +144,7 @@ R22: docs/user_stories/story__track_my_pitches.md
 R23: docs/user_stories/story__track_my_pitches.md
 R24: docs/user_stories/story__screen_incoming_pitches.md
 R25: docs/user_stories/story__track_my_pitches.md
+R25a: frontend/src/app_shell.test.tsx
 R26: docs/user_stories/story__preview_the_shipped_feature.md
 R27: TODO — add a test asserting one toast at a time and timer replacement
 R28: docs/user_stories/story__browse_the_pipeline_board.md

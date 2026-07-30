@@ -44,6 +44,7 @@ This module DOES NOT invent copy for a status it does not recognise.
 R1 (MUST): Build the pipeline card as `article.card.status-{STATUS}` wrapping `card-main` → (`card-copy` → `card-meta`, `card-title`, `card-scope`) and the vote control as the second child of `card-main`. This is the frozen anatomy; the stylesheet lays out nothing that is not in this shape.
 R2 (MUST): Render the feature's `description` as the `card-scope` line. The wire field is `description`; the community calls it the functional scope, and the class name follows the community.
 R3 (MUST): Render `card-meta` as, in order, the stage pill, any dedup note, then `card-byline` reading `{author_handle} · {relative time}`. Derive the relative time from `created_at` locally — minutes under an hour, hours under a day, days beyond.
+R3a (MUST): Show the relative time **whether or not** a handle exists, dropping only the handle and its separator when it is null. When both were bundled, an account-less pitch lost its timestamp too and the card read as though it had no history at all — while seeded rows beside it showed a full byline, which looks like a bug rather than an anonymous author.
 R4 (MUST): Map each status to its pill exactly once: `CONSOLIDATING` → `pill-consolidating` with an animated `wand` and `AI Merging Duplicates`; `IN_SPRINT` → `pill-building` with a `loading-ring` and `AI Building`; `COMPILED` → `pill-live` and `Live in Sandbox`; `SPLIT` → `pill-evolving` and `AI Evolving`.
 R5 (MUST): Render **no pill at all** for `VOTING`. The live hype button is that card's status — adding a "in voting" chip next to a button that plainly invites voting is noise, and there is deliberately no `pill-voting` class to reach for.
 R6 (MUST): Render an unrecognised status as a card with no pill rather than crashing or rendering blank, and MUST NOT print the raw enum as user-facing copy. The status set can grow server-side before this component is regenerated.
@@ -62,7 +63,7 @@ R17 (MUST): Build `HoldingCard` as `card card-holding` → `holding-header` (a `
 R18 (MUST): Show `ai_explanation` in that panel. It is the only thing the community is ever told about why an idea was held back, and a holding card without its reason reads as the system quietly binning the pitch.
 R19 (MUST): Build `ShippedCard` with a `pill-shipped` reading `🏆 Shipped in {shipped_version}`, the byline as the relative `shipped_at`, and a `shipped-credit` paragraph reading `Pitched by {author_handle} · live in the sandbox` with the handle in `<strong>`. The version is the proof that the loop closed, and the credit is the reward the pitcher actually came for.
 R20 (MUST): Build `VaultCard` with a `pill-vault`, the standard archived explanation in place of the scope, and a `reboot-btn` calling `onReboot` with the feature id. An archive nobody can escape is a graveyard; the reboot is what makes it a vault.
-R21 (MUST NOT): Render `author_id`, or any id, as visible text. `author_handle` is the only identity the board shows, and it is nullable — omit the byline rather than printing `anonymous`, `unknown`, or `null`.
+R21 (MUST NOT): Render `author_id`, or any id, as visible text. `author_handle` is the only identity the board shows, and it is nullable — omit **the handle** rather than printing `anonymous`, `unknown`, or `null`. Per R3a the timestamp still shows.
 R22 (MUST): Pass the feature's title to every `UpvoteButton` as its `label`, on parents as well as children. Without it every vote control on the board shares the accessible name `Upvote — 3 upvotes`, so a screen-reader user tabbing a list of twenty features cannot tell which idea they are about to vote for.
 R23 (MUST): Keep every card operable by keyboard: each control is a real `<button>`, and nothing interactive is a bare `div` with a click handler.
 </contract_rules>
@@ -93,6 +94,7 @@ the card does not also need to guess at the count.
 R1: docs/user_stories/story__browse_the_pipeline_board.md
 R2: docs/user_stories/story__browse_the_pipeline_board.md
 R3: docs/user_stories/story__browse_the_pipeline_board.md
+R3a: frontend/src/components/feature_card.test.tsx
 R4: docs/user_stories/story__watch_the_agents_work.md
 R5: docs/user_stories/story__upvote_a_feature.md
 R6: frontend/src/components/feature_card.test.tsx
