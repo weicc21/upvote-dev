@@ -533,3 +533,47 @@ async def test_r6a_the_pdd_credential_is_passed_to_the_child(target: pathlib.Pat
     await compile_feature(feature(), FakeSupabase([feature()]), FakeRedis(), runner=run)
     env = run.calls[0]["env"]  # type: ignore[attr-defined]
     assert env.get("TOKENROUTER_API_KEY") == "tr-test-key"
+
+
+# ===========================================================================
+# R1 — the block region reads in build order
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_r1_a_second_block_appends_after_the_first(target: pathlib.Path) -> None:
+    """Oldest first, so the blueprint reads as the app's history.
+
+    Inserting directly under the anchor reverses the region, and a later block
+    that modifies an earlier feature would sit above the thing it changes.
+    """
+    first = feature(id="f-old", title="Custom emoji icon per habit")
+    second = feature(id="f-new", title="Streak counter on every habit")
+
+    await compile_feature(first, FakeSupabase([first]), FakeRedis(), runner=runner_returning(0))
+    await compile_feature(second, FakeSupabase([second]), FakeRedis(), runner=runner_returning(0))
+
+    text = prompt_text(target)
+    assert text.index("Custom emoji icon per habit") < text.index("Streak counter on every habit")
+
+
+@pytest.mark.asyncio
+async def test_r1_the_anchor_stays_above_every_block(target: pathlib.Path) -> None:
+    for n in range(3):
+        f = feature(id=f"f-{n}", title=f"Feature number {n}")
+        await compile_feature(f, FakeSupabase([f]), FakeRedis(), runner=runner_returning(0))
+    text = prompt_text(target)
+    anchor_at = text.index(ANCHOR)
+    for n in range(3):
+        assert anchor_at < text.index(f"Feature number {n}")
+
+
+@pytest.mark.asyncio
+async def test_r1_appending_does_not_accumulate_blank_lines(target: pathlib.Path) -> None:
+    """A regenerated blueprint is read by a model; stray whitespace is noise."""
+    for n in range(4):
+        f = feature(id=f"f-{n}", title=f"Feature number {n}")
+        await compile_feature(f, FakeSupabase([f]), FakeRedis(), runner=runner_returning(0))
+    text = prompt_text(target)
+    assert "\n\n\n" not in text, "blank lines accumulated between blocks"
+    assert text.endswith("\n") and not text.endswith("\n\n")

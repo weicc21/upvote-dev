@@ -8,7 +8,6 @@
 -- Identifier/enum names here are a PHYSICAL CONTRACT shared verbatim with the
 -- backend, the orchestrator, prompts/shared/contracts.prompt, and openapi.yaml.
 -- Do not rename a column, type, or enum label here without changing them there.
--- Redis (queue + ephemeral state) is a separate contract: infrastructure_redis.prompt.
 -- =============================================================================
 
 
@@ -18,7 +17,7 @@
 create extension if not exists pgcrypto;   -- provides gen_random_uuid()
 
 -- NOTE: pgvector is deliberately NOT enabled and no `embedding` column exists —
--- retrieval-based dedup is deferred to roadmap.prompt R1.
+-- retrieval-based dedup is deferred to future roadmap.
 
 
 -- -----------------------------------------------------------------------------
@@ -136,7 +135,7 @@ create table if not exists public.decision_log (
   created_at    timestamptz    not null default now()
 );
 comment on table public.decision_log is
-  'Permanent, write-only governance + outcome dataset (evaluator-model flywheel, roadmap.prompt R7). Never pruned.';
+  'Permanent, write-only governance + outcome dataset. Never pruned.';
 
 -- Compiler diagnostics. High-churn — pruned on schedule.
 create table if not exists public.build_logs (

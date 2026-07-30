@@ -34,7 +34,7 @@ Duplicate: a second Feature Block for a feature whose id already appears in the 
 Safe: of running the command through a shell, that the string came from operator configuration and never from anything a community member typed.
 Successful: of a compile, that the runner exited zero within the timeout. Nothing else is inspected — pdd owns whether the generated source is any good.
 Feature Block: the text this module appends to the target prompt for one shipped feature — its title, the behaviour the community asked for, and a comment carrying its id. The target prompt's own header calls these "validated community Feature Blocks".
-Anchor: the line `# [COMMUNITY FEATURES INSERTION ZONE]` in the target prompt. Everything above it is the baseline blueprint and is never touched; blocks go below it, oldest first.
+Anchor: the line `# [COMMUNITY FEATURES INSERTION ZONE]` in the target prompt. Everything above it is the baseline blueprint and is never touched; blocks go below it, **oldest first** — each new block appends after the last, so the region reads in build order.
 Runner: the injected seam that actually spawns the compile. Replacing it is what lets the whole path be tested without spending a token or writing to a real repository.
 </vocabulary>
 
@@ -46,7 +46,7 @@ Runner: the injected seam that actually spawns the compile. Replacing it is what
 </capabilities>
 
 <contract_rules>
-R1 (MUST): Append the Feature Block **below** the anchor line `# [COMMUNITY FEATURES INSERTION ZONE]`, preserving every byte above it. The target prompt states that headers above the anchor are never altered — the architecture constraint, the blueprint, and the anchor comment itself are what every later judgement is made against, and rewriting them silently changes the rules the community has been voting under.
+R1 (MUST): Append the Feature Block **after every block already below** the anchor line `# [COMMUNITY FEATURES INSERTION ZONE]`, preserving every byte above it. Appending directly beneath the anchor puts the newest block first and reverses the region: the blueprint should read as the app's history in the order it was built, and a later block that *modifies* an earlier feature would otherwise appear above the thing it changes, which reads backwards to the model implementing it. The target prompt states that headers above the anchor are never altered — the architecture constraint, the blueprint, and the anchor comment itself are what every later judgement is made against, and rewriting them silently changes the rules the community has been voting under.
 R2 (MUST): Fail loudly when the anchor is absent rather than appending to the end of the file. A missing anchor means the target prompt is not the file this module thinks it is, and appending anyway corrupts it.
 R2a (MUST): Resolve the blueprint by its **exact filename** under `TARGET_PROMPT_DIR`, and fail when it is absent. MUST NOT discover it by globbing `*.prompt` and taking the first match — that directory is a whole repository, and appending community features into whatever file happens to sort first is unrecoverable.
 R3 (MUST): Write the whole prompt file **atomically** — render the new contents in memory, write a temporary file in the same directory, then replace. A crash midway through a direct write leaves the target app with a truncated prompt and no way to tell what it used to be.

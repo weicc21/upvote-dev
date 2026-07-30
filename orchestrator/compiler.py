@@ -171,7 +171,15 @@ def _insert_block(prompt_text: str, block: str) -> str:
     else:
         before = prompt_text[: nl + 1]
         after = prompt_text[nl + 1 :]
-    return before + "\n" + block + after
+
+    # R1: append *after* the blocks already there, so the region reads oldest
+    # first. Inserting straight under the anchor reverses it, and a block that
+    # modifies an earlier feature would then sit above the thing it changes.
+    existing = after.strip("\n")
+    body = block.strip("\n")
+    if existing:
+        return f"{before}\n{existing}\n\n{body}\n"
+    return f"{before}\n{body}\n"
 
 
 def _feature_already_in_prompt(prompt_text: str, feature_id: str) -> bool:
