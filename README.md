@@ -159,4 +159,4 @@ the frontend tests run against a stubbed `api_client`.
 | `schema.sql` | Postgres schema — paste into Supabase |
 | `architecture.json` | Module decomposition: paths, dependencies, build order |
 | `.env.example` | Every configuration key, documented |
-| `backend/` `orchestrator/` `frontend/` `shared/` | **Generated.** Created by step 5, not committed |
+| `backend/` `orchestrator/` `frontend/` `shared/` | **Generated.** Created by step 5 |
