@@ -302,6 +302,70 @@ pdd auto-deps prompts/backend/routes/writes_python.prompt backend/ --csv prompts
 
 Prefer `<include mode="interface">` for large dependencies — signatures and docstrings only.
 
+## Step 5a — The module map (a workaround, not a pdd feature)
+
+`auto-deps` and `<include>` solve *which* dependency a prompt needs. They do not solve **what it is
+called**, and that is where generated code actually breaks.
+
+`<include>` drops a dependency's source into the prompt **unlabelled**, so the only path-shaped hint
+the compiler sees is the *prompt* path in `<pdd-dependency>` — and the prompt tree and the package
+tree do not share names. `prompts/orchestration/screener_python.prompt` produces
+`orchestrator/screener.py`. Nothing in the prompt says so, so the model writes the import that reads
+most naturally, and `from orchestration.screener import …` fails at runtime rather than at generate
+time.
+
+The fix here is one frozen file — [`prompts/shared/module_map.md`](../prompts/shared/module_map.md)
+— included by **every** prompt in the repository (25 of 25):
+
+```
+<dependencies>
+<include>prompts/shared/module_map.md</include>
+…
+</dependencies>
+```
+
+### What belongs in it
+
+Not documentation. **Only facts a compiler model has already guessed wrong, or provably would.**
+Every entry in this project's map was added after a specific failure:
+
+| The guess | The truth | How it failed |
+|---|---|---|
+| `from orchestration.screener import …` | package is `orchestrator` | `ImportError` at runtime |
+| `backend.dependencies` | `backend.deps` | `ImportError` |
+| `create_async_client(...)` | `create_client` | `ImportError` |
+| `rpc("increment_upvotes", {"inc": 1, "row_id": …})` | one argument, `row_id` | `PGRST202 Could not find the function` |
+| `select("shipped_version")` on a view | the column is `version` | `42703 column does not exist` |
+| `insert({"feature_id": …})` into `build_logs` | that table has no such column | `PGRST204` |
+| `import aiohttp` | only `httpx` is installed | `ModuleNotFoundError` mid-pipeline |
+| `import React, { useState }` | `jsx: react-jsx` + `noUnusedLocals` | typecheck failure |
+| `class X(str, Enum)` | `StrEnum` | `f"{member}"` renders `X.MEMBER` |
+
+The pattern in every row: **a name that is plausible, reads well, and does not exist.** Type errors
+the compiler catches are not worth an entry; names resolved at *runtime* — imports, RPC signatures,
+column names, table names, env keys — are exactly what it cannot catch and what a model will invent
+confidently.
+
+Group them so a model scanning the file finds the relevant section fast: package layout, names that
+look importable and are not, third-party symbols pinned to installed versions, database
+functions/views/columns, per-role model settings, framework-specific gotchas. End with the standing
+rule:
+
+> Import only from the left-hand column above, plus the standard library and declared third-party
+> packages. A module path that appears nowhere in this file does not exist — do not invent one to
+> make an import read naturally.
+
+### When to add to it
+
+After any generated-code failure that turns out to be a guess about **a name rather than a
+behaviour**. A behavioural defect belongs in the module's own `<contract_rules>`; a naming defect
+belongs here, because it will otherwise recur in every *other* module that touches the same thing.
+That is the whole economics of the file: fixing the rule fixes one prompt, and fixing the map fixes
+all 25.
+
+Keep it short enough to stay read. It is prepended to every generation, so an entry that is merely
+interesting costs input tokens on every compile forever.
+
 ## Step 6 — Link stories to prompts
 
 ```bash
