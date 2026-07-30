@@ -288,7 +288,7 @@ drift immediately.
 Then check structure deterministically (free, no LLM):
 
 ```bash
-pdd contracts check prompts/backend/routes/writes_python.prompt
+pdd contracts check prompts/backend/routes/features_python.prompt
 pdd contracts check prompts --strict --stories docs/user_stories
 ```
 
@@ -297,7 +297,7 @@ pdd contracts check prompts --strict --stories docs/user_stories
 Replaces hand-written `<include>` blocks with ones derived from the real tree:
 
 ```bash
-pdd auto-deps prompts/backend/routes/writes_python.prompt backend/ --csv prompts/backend/io_dependencies.csv
+pdd auto-deps prompts/backend/routes/features_python.prompt backend/
 ```
 
 Prefer `<include mode="interface">` for large dependencies — signatures and docstrings only.
@@ -370,7 +370,7 @@ interesting costs input tokens on every compile forever.
 
 ```bash
 pdd story link docs/user_stories/story__pitch_a_feature.md \
-  --prompt prompts/backend/routes/writes_python.prompt \
+  --prompt prompts/backend/routes/features_python.prompt \
   --prompt prompts/frontend/components/submit_modal_typescriptreact.prompt \
   --prompts-dir prompts
 
@@ -422,7 +422,7 @@ Three reasons, all learned the expensive way:
 If you already patched the code, back-propagate it at the *behaviour* level:
 
 ```bash
-pdd update prompts/backend/routes/writes_python.prompt backend/routes/writes.py
+pdd update prompts/backend/routes/features_python.prompt backend/routes/features.py
 ```
 
 Write the recovered requirement as an observable outcome, never as a transcription of private

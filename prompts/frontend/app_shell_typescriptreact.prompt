@@ -100,9 +100,10 @@ only.
 R17 and is seeded by the REST read. A vote cast in another tab will not light up here until a
 refetch.
 
-**The chyron is scripted.** `Broadcast` cycles its own default array until US-11 feeds it
-`broadcast_events` over Realtime. The seam is the `messages` prop, so that change touches no markup
-here.
+**The chyron is live (US-11).** `listBroadcastEvents` loads the recent tail and `onBroadcastEvent`
+appends rows as `backend/event_relay.py` writes them, so the strip shows the real pipeline.
+`Broadcast`'s own default array remains only as the fallback for a quiet pipeline, which is why
+`messages` is left unset when the list is empty (R34).
 </pdd>
 
 <dependencies>

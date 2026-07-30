@@ -78,11 +78,11 @@ environment or build a second `Settings`.
 R1: TODO — add a test that an unbound provider raises RuntimeError
 R2: TODO — add a test that no module-level client global exists
 R3: TODO — add a test that importing backend.deps opens no connection
-R4: docs/user-stories/US-01-pitch-a-feature.md
-R5: docs/user-stories/US-01-pitch-a-feature.md
-R6: docs/user-stories/US-05-browse-the-pipeline-board.md
+R4: docs/user_stories/story__pitch_a_feature.md
+R5: docs/user_stories/story__pitch_a_feature.md
+R6: docs/user_stories/story__browse_the_pipeline_board.md
 R7: TODO — add a test that no caller id appears in a 401 body or log
 R8: TODO — add a test asserting an unbound provider does not surface as a 401
-R9: docs/user-stories/US-01-pitch-a-feature.md
-R10: docs/user-stories/US-01-pitch-a-feature.md
+R9: docs/user_stories/story__pitch_a_feature.md
+R10: docs/user_stories/story__pitch_a_feature.md
 </coverage>

@@ -74,12 +74,9 @@ it vanish when the TTL lapses. The alternative is admitting unscreened content, 
 The real fix is a non-destructive queue (`BLMOVE` onto a processing list) so a failed item can be
 retried; that is the same upgrade the daemon's own `<pdd>` names, and it closes both holes at once.
 
-**No `llm_client` module yet.** The `judge` seam is deliberately a callable rather than an
-imported client, so this stays one module while there is one consumer. When `pm_agent` (US-03) and
-the architect need the same retry, timeout, and JSON-parsing behaviour, extract the default judge
-into `orchestrator/llm_client.py` — every rule here holds unchanged, because they are written
-against the seam and not the transport.
-</pdd>
+**The `judge` seam is a callable, not a module.** It takes `(system_prompt, user_prompt)` and
+returns raw model text, so a test drives screening with a stub and no network. Every rule here is
+written against that shape rather than against any particular client.
 
 <dependencies>
 <include>prompts/shared/module_map.md</include>

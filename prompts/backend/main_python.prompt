@@ -114,16 +114,16 @@ R1: TODO — add a test asserting importing backend.main opens no connection
 R2: TODO — add a test asserting both clients close when one raises
 R3: TODO — add a test asserting no second Settings is constructed
 R4: TODO — add a test asserting DEV_MODE=true logs a warning at startup
-R5: docs/user-stories/US-05-browse-the-pipeline-board.md
-R6: docs/user-stories/US-05-browse-the-pipeline-board.md
-R7: docs/user-stories/US-01-pitch-a-feature.md
-R8: docs/user-stories/US-01-pitch-a-feature.md
-R9: docs/user-stories/US-01-pitch-a-feature.md
+R5: docs/user_stories/story__browse_the_pipeline_board.md
+R6: docs/user_stories/story__browse_the_pipeline_board.md
+R7: docs/user_stories/story__pitch_a_feature.md
+R8: docs/user_stories/story__pitch_a_feature.md
+R9: docs/user_stories/story__pitch_a_feature.md
 R10: TODO — add a test asserting no caller id or token reaches a log or response
-R11: docs/user-stories/US-01-pitch-a-feature.md
-R12: docs/user-stories/US-01-pitch-a-feature.md
+R11: docs/user_stories/story__pitch_a_feature.md
+R12: docs/user_stories/story__pitch_a_feature.md
 R13: TODO — add a test asserting a 500 body carries no exception text
-R14: docs/user-stories/US-01-pitch-a-feature.md
+R14: docs/user_stories/story__pitch_a_feature.md
 R15: TODO — add a test asserting a foreign origin is refused
 R16: TODO — add a test asserting uvicorn can import backend.main:app
 </coverage>

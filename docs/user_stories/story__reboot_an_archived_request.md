@@ -36,10 +36,10 @@ so that a good idea that arrived at the wrong moment gets a second run instead o
 
 Backs the `reboot-btn` control on `VaultCard` and the reboot handler in `app_shell`.
 
-**Only the presentation half is built.** The control renders and the shell moves the row to `VOTING`
-locally with a toast, but nothing persists: a reload puts the request back in the Vault. This is a
-deliberate split, not an oversight — the UI half is what the Vault tab needs to not read as a dead
-end, and it is safe to ship ahead of the write because it touches no other flow.
+**Both halves are built.** `VaultCard` renders the control, and `POST /api/features/{id}/reboot`
+(`backend/routes/lifecycle.py`) persists it: the row returns to `VOTING`, `created_at` resets, the
+count restarts at 1 with the reviver's vote, and prior votes are cleared. The shell only drops the
+row from the Vault once the server confirms.
 
 **The backend half is `POST /api/features/{id}/reboot`**, already declared in the frozen
 `openapi.yaml`: "ARCHIVED -> VOTING; resets created_at and upvotes to 1; no re-enqueue", returning

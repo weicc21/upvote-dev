@@ -6,7 +6,7 @@
 --   run more than once. No external tooling required.
 --
 -- Identifier/enum names here are a PHYSICAL CONTRACT shared verbatim with the
--- backend, the orchestrator, prompts/shared/contracts.prompt, and openapi.yaml.
+-- backend, the orchestrator, prompts/shared/constants_python.prompt, and openapi.yaml.
 -- Do not rename a column, type, or enum label here without changing them there.
 -- =============================================================================
 
@@ -333,7 +333,7 @@ grant select on public.feature_shipped_meta to anon, authenticated;
 
 -- =============================================================================
 -- Row-Level Security — deliberately NOT enabled for the hackathon (DEV_MODE;
--- see forum_backend.prompt). When real auth (Supabase JWT) lands, reinstate the
+-- see prompts/backend/deps_python.prompt). When real auth (Supabase JWT) lands, reinstate the
 -- auth.users FKs and enable RLS. Reference policy set, left commented out:
 --
 --   alter table public.feature_requests add constraint feature_requests_author_fk
